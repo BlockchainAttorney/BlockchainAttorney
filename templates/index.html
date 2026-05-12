@@ -1,0 +1,108 @@
+<!DOCTYPE html>
+<html lang="ro">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Transcriptor AI — BlockchainAttorney</title>
+    <link rel="stylesheet" href="/static/css/style.css">
+</head>
+<body>
+    <header>
+        <div class="logo">
+            <span class="logo-icon">⚖️</span>
+            <div>
+                <span class="logo-title">Transcriptor AI</span>
+                <span class="logo-sub">BlockchainAttorney</span>
+            </div>
+        </div>
+        <div id="api-status" class="api-badge loading">Se verifica...</div>
+    </header>
+
+    <main>
+        <!-- SECTIUNEA DE INREGISTRARE -->
+        <section class="card record-card">
+            <h2>Inregistreaza convorbirea</h2>
+
+            <div class="speakers-select">
+                <label>Numar de vorbitori:</label>
+                <div class="speaker-btns">
+                    <button class="speaker-btn active" data-n="2">2 (Avocat + Client)</button>
+                    <button class="speaker-btn" data-n="3">3 vorbitori</button>
+                </div>
+            </div>
+
+            <div class="record-area">
+                <button id="record-btn" class="record-btn" title="Incepe inregistrarea">
+                    <span class="mic-icon">🎙️</span>
+                    <span id="record-label">Apasa pentru a inregistra</span>
+                </button>
+
+                <div id="recording-info" class="recording-info hidden">
+                    <div class="pulse-ring"></div>
+                    <span id="timer">00:00</span>
+                    <span class="rec-text">SE INREGISTREAZA</span>
+                </div>
+            </div>
+
+            <div id="audio-preview" class="audio-preview hidden">
+                <audio id="audio-player" controls></audio>
+                <button id="transcribe-btn" class="btn-primary">
+                    Transcrie inregistrarea
+                </button>
+                <button id="discard-btn" class="btn-ghost">Sterge si reinregistreaza</button>
+            </div>
+
+            <div id="progress-area" class="progress-area hidden">
+                <div class="spinner"></div>
+                <p id="progress-text">Se transcrie... (prima transcribe dureaza mai mult)</p>
+            </div>
+        </section>
+
+        <!-- SECTIUNEA DE REZULTAT -->
+        <section id="result-section" class="card result-card hidden">
+            <div class="result-header">
+                <h2>Transcript</h2>
+                <div class="result-meta">
+                    <span id="meta-duration" class="meta-chip">--</span>
+                    <span id="meta-lang" class="meta-chip">--</span>
+                </div>
+            </div>
+
+            <!-- REZUMAT AI -->
+            <div id="summary-section" class="summary-box hidden">
+                <div class="summary-header">
+                    <span class="ai-badge">AI</span>
+                    <h3>Rezumat automat</h3>
+                    <button id="gen-summary-btn" class="btn-sm">Genereaza rezumat</button>
+                </div>
+                <div id="summary-content" class="summary-content hidden">
+                    <div id="summary-loading" class="summary-loading hidden">
+                        <div class="spinner-sm"></div> Se genereaza rezumatul...
+                    </div>
+                    <div id="summary-text"></div>
+                </div>
+            </div>
+
+            <!-- TRANSCRIPT -->
+            <div id="transcript-container" class="transcript-container"></div>
+
+            <!-- EXPORT -->
+            <div class="export-bar">
+                <span class="export-label">Exporta:</span>
+                <button id="export-word" class="btn-export btn-word">
+                    Word (.docx)
+                </button>
+                <button id="export-pdf" class="btn-export btn-pdf">
+                    PDF
+                </button>
+            </div>
+        </section>
+    </main>
+
+    <footer>
+        <p>Procesare 100% locala &bull; Audio-ul nu paraseste calculatorul tau &bull; Powered by Whisper AI</p>
+    </footer>
+
+    <script src="/static/js/app.js"></script>
+</body>
+</html>

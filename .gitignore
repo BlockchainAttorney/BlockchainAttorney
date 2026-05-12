@@ -1,0 +1,21 @@
+# Environment
+.env
+venv/
+__pycache__/
+*.pyc
+*.pyo
+
+# Transcrieri (date private ale clientilor)
+transcripts/
+
+# Modele Whisper descarcate local
+~/.cache/huggingface/
+models/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
