@@ -223,15 +223,15 @@ transcribeBtn.addEventListener("click", async () => {
     progressArea.classList.remove("hidden");
     resultSection.classList.add("hidden");
 
-    const storedFP = localStorage.getItem(VP_KEY);
-    progressText.textContent = storedFP
-        ? "Se transcrie si se identifica vorbitorii dupa voce..."
+    const activeFP = getActiveFP();
+    progressText.textContent = activeFP
+        ? `Se transcrie si se identifica vorbitorii (activ: ${localStorage.getItem(VP_ACTIVE_KEY)})...`
         : "Se trimite audio la Groq Whisper... (de obicei 5-30 sec)";
 
     const formData = new FormData();
     formData.append("audio", currentAudioBlob, "recording.webm");
     formData.append("num_speakers", numSpeakers);
-    if (storedFP) formData.append("voice_fingerprint", storedFP);
+    if (activeFP) formData.append("voice_fingerprint", JSON.stringify(activeFP));
 
     try {
         const res = await fetch("/transcribe", { method: "POST", body: formData });
@@ -467,23 +467,32 @@ async function exportDoc(type) {
     }
 }
 
-// ===== VOICE PROFILE =====
-const vpToggle      = $("vp-toggle");
-const vpBody        = $("vp-body");
-const vpChevron     = vpToggle.querySelector(".vp-chevron");
-const vpStatus      = $("vp-status");
-const vpRecordBtn   = $("vp-record-btn");
-const vpBtnLabel    = $("vp-btn-label");
-const vpTimerRow    = $("vp-timer-row");
-const vpTimerEl     = $("vp-timer");
-const vpPreview     = $("vp-preview");
-const vpAudioEl     = $("vp-audio");
-const vpSaveBtn     = $("vp-save-btn");
-const vpDiscardBtn  = $("vp-discard-btn");
-const vpLoading     = $("vp-loading");
-const vpSaved       = $("vp-saved");
-const vpResetBtn    = $("vp-reset-btn");
+// ===== VOICE PROFILES (multi-user) =====
+// Storage: bl_voice_profiles = [{name, fingerprint, createdAt}, ...]
+// Storage: bl_active_profile = name (string) | null
+
+const VP_PROFILES_KEY = "bl_voice_profiles";
+const VP_ACTIVE_KEY   = "bl_active_profile";
 const metaDiarization = $("meta-diarization");
+
+const vpToggle       = $("vp-toggle");
+const vpBody         = $("vp-body");
+const vpChevron      = vpToggle.querySelector(".vp-chevron");
+const vpStatus       = $("vp-status");
+const vpProfilesList = $("vp-profiles-list");
+const vpActiveRow    = $("vp-active-row");
+const vpActiveSelect = $("vp-active-select");
+const vpClearActive  = $("vp-clear-active");
+const vpRecordBtn    = $("vp-record-btn");
+const vpBtnLabel     = $("vp-btn-label");
+const vpTimerRow     = $("vp-timer-row");
+const vpTimerEl      = $("vp-timer");
+const vpPreview      = $("vp-preview");
+const vpAudioEl      = $("vp-audio");
+const vpSaveBtn      = $("vp-save-btn");
+const vpDiscardBtn   = $("vp-discard-btn");
+const vpLoading      = $("vp-loading");
+const vpNameInput    = $("vp-name-input");
 
 vpToggle.addEventListener("click", () => {
     const open = !vpBody.classList.contains("hidden");
@@ -491,20 +500,111 @@ vpToggle.addEventListener("click", () => {
     vpChevron.classList.toggle("open", !open);
 });
 
+function getProfiles() {
+    try { return JSON.parse(localStorage.getItem(VP_PROFILES_KEY) || "[]"); }
+    catch { return []; }
+}
+
+function saveProfiles(profiles) {
+    localStorage.setItem(VP_PROFILES_KEY, JSON.stringify(profiles));
+}
+
+function getActiveProfile() {
+    const name = localStorage.getItem(VP_ACTIVE_KEY);
+    if (!name) return null;
+    return getProfiles().find(p => p.name === name) || null;
+}
+
+function getActiveFP() {
+    const p = getActiveProfile();
+    return p ? p.fingerprint : null;
+}
+
 function initVoiceProfileUI() {
-    const fp = localStorage.getItem(VP_KEY);
-    if (fp) {
-        vpStatus.textContent = "Voce inregistrata ✓";
-        vpStatus.className = "vp-status-badge set";
-        vpSaved.classList.remove("hidden");
-        vpPreview.classList.add("hidden");
-    } else {
-        vpStatus.textContent = "Neinregistrat";
+    const profiles = getProfiles();
+    const activeName = localStorage.getItem(VP_ACTIVE_KEY);
+
+    // Status badge
+    if (profiles.length === 0) {
+        vpStatus.textContent = "Niciun profil";
         vpStatus.className = "vp-status-badge unset";
-        vpSaved.classList.add("hidden");
+    } else if (activeName) {
+        vpStatus.textContent = `Activ: ${activeName}`;
+        vpStatus.className = "vp-status-badge set";
+    } else {
+        vpStatus.textContent = `${profiles.length} profil${profiles.length > 1 ? "uri" : ""} inregistrat${profiles.length > 1 ? "e" : ""}`;
+        vpStatus.className = "vp-status-badge set";
+    }
+
+    // Render profile list
+    vpProfilesList.innerHTML = "";
+    profiles.forEach(p => {
+        const isActive = p.name === activeName;
+        const item = document.createElement("div");
+        item.className = "vp-profile-item" + (isActive ? " active-profile" : "");
+
+        const initials = p.name.split(" ").map(w => w[0]).join("").slice(0, 2).toUpperCase();
+        item.innerHTML = `
+            <div class="vp-profile-avatar">${escapeHtml(initials)}</div>
+            <div class="vp-profile-info">
+                <div class="vp-profile-name">${escapeHtml(p.name)}</div>
+                <div class="vp-profile-date">Inregistrat: ${p.createdAt || "—"}</div>
+            </div>
+            <div class="vp-profile-actions">
+                <button class="vp-activate-btn ${isActive ? "active" : ""}" data-name="${escapeHtml(p.name)}">
+                    ${isActive ? "Activ ✓" : "Selecteaza"}
+                </button>
+                <button class="vp-delete-btn" data-name="${escapeHtml(p.name)}" title="Sterge profil">✕</button>
+            </div>
+        `;
+        vpProfilesList.appendChild(item);
+    });
+
+    // Activate buttons
+    vpProfilesList.querySelectorAll(".vp-activate-btn:not(.active)").forEach(btn => {
+        btn.addEventListener("click", () => {
+            localStorage.setItem(VP_ACTIVE_KEY, btn.dataset.name);
+            initVoiceProfileUI();
+        });
+    });
+    vpProfilesList.querySelectorAll(".vp-delete-btn").forEach(btn => {
+        btn.addEventListener("click", () => {
+            if (!confirm(`Stergi profilul lui "${btn.dataset.name}"?`)) return;
+            const updated = getProfiles().filter(p => p.name !== btn.dataset.name);
+            saveProfiles(updated);
+            if (activeName === btn.dataset.name) localStorage.removeItem(VP_ACTIVE_KEY);
+            initVoiceProfileUI();
+        });
+    });
+
+    // Active row (dropdown selector)
+    if (profiles.length > 0) {
+        vpActiveRow.classList.remove("hidden");
+        vpActiveSelect.innerHTML = `<option value="">— Niciun avocat activ —</option>`;
+        profiles.forEach(p => {
+            const opt = document.createElement("option");
+            opt.value = p.name;
+            opt.textContent = p.name;
+            if (p.name === activeName) opt.selected = true;
+            vpActiveSelect.appendChild(opt);
+        });
+    } else {
+        vpActiveRow.classList.add("hidden");
     }
 }
 
+vpActiveSelect.addEventListener("change", () => {
+    if (vpActiveSelect.value) localStorage.setItem(VP_ACTIVE_KEY, vpActiveSelect.value);
+    else localStorage.removeItem(VP_ACTIVE_KEY);
+    initVoiceProfileUI();
+});
+
+vpClearActive.addEventListener("click", () => {
+    localStorage.removeItem(VP_ACTIVE_KEY);
+    initVoiceProfileUI();
+});
+
+// Recording for new profile
 vpRecordBtn.addEventListener("click", async () => {
     if (vpMediaRecorder && vpMediaRecorder.state === "recording") {
         vpMediaRecorder.stop();
@@ -524,7 +624,6 @@ vpRecordBtn.addEventListener("click", async () => {
                 vpAudioBlob = new Blob(vpAudioChunks, { type: mime || "audio/webm" });
                 vpAudioEl.src = URL.createObjectURL(vpAudioBlob);
                 vpPreview.classList.remove("hidden");
-                vpSaved.classList.add("hidden");
             };
             vpMediaRecorder.start(500);
             vpSeconds = 0;
@@ -551,7 +650,13 @@ vpDiscardBtn.addEventListener("click", () => {
 });
 
 vpSaveBtn.addEventListener("click", async () => {
-    if (!vpAudioBlob) return;
+    const name = vpNameInput.value.trim();
+    if (!name) { alert("Introdu numele avocatului inainte de a salva."); vpNameInput.focus(); return; }
+    if (!vpAudioBlob) { alert("Inregistreaza o proba vocala mai intai."); return; }
+    if (getProfiles().some(p => p.name === name)) {
+        if (!confirm(`Exista deja un profil pentru "${name}". Il suprascrii?`)) return;
+    }
+
     vpLoading.classList.remove("hidden");
     vpPreview.classList.add("hidden");
 
@@ -562,7 +667,22 @@ vpSaveBtn.addEventListener("click", async () => {
         const res = await fetch("/voice/register", { method: "POST", body: formData });
         const data = await res.json();
         if (data.error) throw new Error(data.error);
-        localStorage.setItem(VP_KEY, JSON.stringify(data.fingerprint));
+
+        const profiles = getProfiles().filter(p => p.name !== name);
+        profiles.push({
+            name,
+            fingerprint: data.fingerprint,
+            createdAt: new Date().toLocaleDateString("ro-RO"),
+        });
+        saveProfiles(profiles);
+        localStorage.setItem(VP_ACTIVE_KEY, name);
+
+        // Reset form
+        vpNameInput.value = "";
+        vpAudioBlob = null;
+        vpAudioEl.src = "";
+        document.getElementById("vp-add-section").removeAttribute("open");
+
         initVoiceProfileUI();
     } catch (err) {
         alert("Eroare la salvarea profilului: " + err.message);
@@ -570,11 +690,6 @@ vpSaveBtn.addEventListener("click", async () => {
     } finally {
         vpLoading.classList.add("hidden");
     }
-});
-
-vpResetBtn.addEventListener("click", () => {
-    localStorage.removeItem(VP_KEY);
-    initVoiceProfileUI();
 });
 
 // ===== INIT =====

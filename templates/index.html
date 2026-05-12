@@ -31,49 +31,65 @@
     </header>
 
     <main>
-        <!-- PROFIL VOCAL -->
+        <!-- PROFILURI VOCALE -->
         <section class="card voice-profile-card">
             <div class="voice-profile-header" id="vp-toggle">
                 <div class="vp-title">
                     <span class="vp-icon">🎤</span>
                     <div>
-                        <strong>Profilul meu vocal</strong>
-                        <span class="vp-subtitle">Inregistreaza vocea ta o singura data pentru recunoastere automata</span>
+                        <strong>Profiluri vocale avocati</strong>
+                        <span class="vp-subtitle">Fiecare avocat se inregistreaza o data — aplicatia il recunoaste automat</span>
                     </div>
                 </div>
-                <div id="vp-status" class="vp-status-badge unset">Neinregistrat</div>
+                <div id="vp-status" class="vp-status-badge unset">Niciun profil</div>
                 <span class="vp-chevron">›</span>
             </div>
 
             <div id="vp-body" class="vp-body hidden">
-                <p class="vp-info">Vorbeste <strong>20-30 de secunde</strong> natural (prezinta-te, citeste ceva). Aplicatia va invata timbrul vocii tale si te va eticheta automat ca <strong>"Avocat"</strong> in fiecare transcript.</p>
 
-                <div class="vp-record-area">
-                    <button id="vp-record-btn" class="vp-btn-record">
-                        <span id="vp-mic">🎙️</span>
-                        <span id="vp-btn-label">Incepe inregistrarea</span>
-                    </button>
-                    <div id="vp-timer-row" class="vp-timer-row hidden">
-                        <div class="pulse-ring red"></div>
-                        <span id="vp-timer">00:00</span>
-                        <span class="rec-text">SE INREGISTREAZA</span>
+                <!-- LISTA PROFILURI -->
+                <div id="vp-profiles-list" class="vp-profiles-list"></div>
+
+                <!-- PROFIL ACTIV SELECTAT -->
+                <div id="vp-active-row" class="vp-active-row hidden">
+                    <span class="vp-active-label">Avocat activ pentru urmatoarea inregistrare:</span>
+                    <select id="vp-active-select" class="vp-active-select"></select>
+                    <button id="vp-clear-active" class="btn-ghost-sm">Fara profil</button>
+                </div>
+
+                <!-- ADAUGA PROFIL NOU -->
+                <details id="vp-add-section" class="vp-add-section">
+                    <summary>+ Adauga avocat nou</summary>
+                    <div class="vp-add-body">
+                        <div class="form-row">
+                            <label>Numele avocatului</label>
+                            <input id="vp-name-input" type="text" placeholder="ex: Alexandru Popescu" maxlength="40">
+                        </div>
+                        <p class="vp-info">Vorbeste <strong>20-30 de secunde</strong> natural dupa ce apesi inregistrare.</p>
+
+                        <div class="vp-record-area">
+                            <button id="vp-record-btn" class="vp-btn-record">
+                                <span>🎙️</span>
+                                <span id="vp-btn-label">Incepe inregistrarea</span>
+                            </button>
+                            <div id="vp-timer-row" class="vp-timer-row hidden">
+                                <div class="pulse-ring red"></div>
+                                <span id="vp-timer">00:00</span>
+                                <span class="rec-text">SE INREGISTREAZA</span>
+                            </div>
+                        </div>
+
+                        <div id="vp-preview" class="vp-preview hidden">
+                            <audio id="vp-audio" controls></audio>
+                            <button id="vp-save-btn" class="btn-primary">Salveaza profil</button>
+                            <button id="vp-discard-btn" class="btn-ghost">Reinregistreaza</button>
+                        </div>
+
+                        <div id="vp-loading" class="vp-loading hidden">
+                            <div class="spinner-sm"></div> Se proceseaza profilul vocal...
+                        </div>
                     </div>
-                </div>
-
-                <div id="vp-preview" class="vp-preview hidden">
-                    <audio id="vp-audio" controls></audio>
-                    <button id="vp-save-btn" class="btn-primary">Salveaza profilul vocal</button>
-                    <button id="vp-discard-btn" class="btn-ghost">Reinregistreaza</button>
-                </div>
-
-                <div id="vp-loading" class="vp-loading hidden">
-                    <div class="spinner-sm"></div> Se proceseaza profilul vocal...
-                </div>
-
-                <div id="vp-saved" class="vp-saved hidden">
-                    Profilul vocal a fost salvat! Vei fi recunoscut automat ca <strong>Avocat</strong>.
-                    <button id="vp-reset-btn" class="btn-ghost-sm">Sterge profilul</button>
-                </div>
+                </details>
             </div>
         </section>
 
