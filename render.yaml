@@ -1,0 +1,30 @@
+services:
+  - type: web
+    name: transcriptor-ai
+    runtime: python
+    plan: free
+    buildCommand: pip install --upgrade pip && pip install -r requirements.txt
+    startCommand: gunicorn app:app --bind 0.0.0.0:$PORT --workers 1 --timeout 300
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.11.9
+      - key: FLASK_ENV
+        value: production
+      - key: LANGUAGE
+        value: ro
+      - key: GROQ_MODEL
+        value: whisper-large-v3
+      - key: GROQ_API_KEY
+        sync: false
+      - key: ANTHROPIC_API_KEY
+        sync: false
+      - key: GOOGLE_CLIENT_ID
+        sync: false
+      - key: GOOGLE_CLIENT_SECRET
+        sync: false
+      - key: FLASK_SECRET_KEY
+        generateValue: true
+      - key: APP_URL
+        sync: false
+      - key: GOOGLE_DRIVE_FOLDER_NAME
+        value: Transcripte Clienti

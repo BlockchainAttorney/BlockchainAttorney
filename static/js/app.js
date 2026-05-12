@@ -6,50 +6,119 @@ let timerInterval = null;
 let secondsElapsed = 0;
 let numSpeakers = 2;
 let currentTranscriptData = null;
-
-const recordBtn      = document.getElementById("record-btn");
-const recordLabel    = document.getElementById("record-label");
-const recordingInfo  = document.getElementById("recording-info");
-const timerEl        = document.getElementById("timer");
-const audioPreview   = document.getElementById("audio-preview");
-const audioPlayer    = document.getElementById("audio-player");
-const transcribeBtn  = document.getElementById("transcribe-btn");
-const discardBtn     = document.getElementById("discard-btn");
-const progressArea   = document.getElementById("progress-area");
-const progressText   = document.getElementById("progress-text");
-const resultSection  = document.getElementById("result-section");
-const transcriptContainer = document.getElementById("transcript-container");
-const metaDuration   = document.getElementById("meta-duration");
-const metaLang       = document.getElementById("meta-lang");
-const summarySection = document.getElementById("summary-section");
-const genSummaryBtn  = document.getElementById("gen-summary-btn");
-const summaryContent = document.getElementById("summary-content");
-const summaryLoading = document.getElementById("summary-loading");
-const summaryText    = document.getElementById("summary-text");
-const exportWord     = document.getElementById("export-word");
-const exportPdf      = document.getElementById("export-pdf");
-const apiStatus      = document.getElementById("api-status");
-
+let currentSummary = null;
 let hasApiKey = false;
+let googleConfigured = false;
+let googleConnected = false;
 let currentAudioBlob = null;
 
-// ===== CHECK API STATUS =====
+// ===== DOM =====
+const $ = id => document.getElementById(id);
+
+const recordBtn       = $("record-btn");
+const recordLabel     = $("record-label");
+const recordingInfo   = $("recording-info");
+const timerEl         = $("timer");
+const audioPreview    = $("audio-preview");
+const audioPlayer     = $("audio-player");
+const transcribeBtn   = $("transcribe-btn");
+const discardBtn      = $("discard-btn");
+const progressArea    = $("progress-area");
+const progressText    = $("progress-text");
+const resultSection   = $("result-section");
+const transcriptContainer = $("transcript-container");
+const metaDuration    = $("meta-duration");
+const metaLang        = $("meta-lang");
+const summarySection  = $("summary-section");
+const genSummaryBtn   = $("gen-summary-btn");
+const summaryContent  = $("summary-content");
+const summaryLoading  = $("summary-loading");
+const summaryError    = $("summary-error");
+const exportWord      = $("export-word");
+const exportPdf       = $("export-pdf");
+const apiStatus       = $("api-status");
+const googleSigninBtn = $("google-signin-btn");
+const googleSignoutBtn = $("google-signout-btn");
+const googleUser      = $("google-user");
+const googleEmail     = $("google-email");
+const googleAvatar    = $("google-avatar");
+const driveSaveSection = $("drive-save-section");
+const driveTitle      = $("drive-title");
+const driveClient     = $("drive-client");
+const driveSaveBtn    = $("drive-save-btn");
+const driveResult     = $("drive-result");
+const foldersList     = $("folders-list");
+
+// ===== API STATUS =====
 async function checkApiStatus() {
     try {
         const res = await fetch("/check-api");
         const data = await res.json();
         hasApiKey = data.has_anthropic_key;
-        if (hasApiKey) {
-            apiStatus.textContent = "Rezumat AI activ";
+        googleConfigured = data.google_configured;
+
+        if (data.has_groq_key) {
+            apiStatus.textContent = "Transcriere activa";
             apiStatus.className = "api-badge ok";
         } else {
-            apiStatus.textContent = "Fara cheie API";
+            apiStatus.textContent = "Groq lipseste";
             apiStatus.className = "api-badge no-key";
         }
     } catch {
-        apiStatus.textContent = "Eroare conexiune";
+        apiStatus.textContent = "Eroare";
         apiStatus.className = "api-badge no-key";
     }
+}
+
+// ===== GOOGLE AUTH =====
+async function checkGoogleStatus() {
+    try {
+        const res = await fetch("/google/status");
+        const data = await res.json();
+        googleConnected = data.connected;
+        googleConfigured = data.configured;
+
+        if (!googleConfigured) {
+            googleSigninBtn.classList.add("hidden");
+            googleUser.classList.add("hidden");
+            return;
+        }
+
+        if (googleConnected && data.user) {
+            googleSigninBtn.classList.add("hidden");
+            googleUser.classList.remove("hidden");
+            googleEmail.textContent = data.user.email || "Conectat";
+            if (data.user.picture) googleAvatar.src = data.user.picture;
+            await loadFolders();
+        } else {
+            googleSigninBtn.classList.remove("hidden");
+            googleUser.classList.add("hidden");
+        }
+    } catch {
+        googleSigninBtn.classList.add("hidden");
+    }
+}
+
+googleSigninBtn.addEventListener("click", () => {
+    window.location.href = "/google/auth";
+});
+
+googleSignoutBtn.addEventListener("click", async () => {
+    await fetch("/google/logout", { method: "POST" });
+    location.reload();
+});
+
+async function loadFolders() {
+    try {
+        const res = await fetch("/google/folders");
+        const data = await res.json();
+        foldersList.innerHTML = "";
+        (data.folders || []).forEach(name => {
+            const opt = document.createElement("option");
+            opt.value = name;
+            foldersList.appendChild(opt);
+        });
+    } catch {}
 }
 
 // ===== SPEAKER SELECTION =====
@@ -74,39 +143,28 @@ async function startRecording() {
     try {
         const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
         audioChunks = [];
-
         const mimeType = getSupportedMime();
         mediaRecorder = new MediaRecorder(stream, mimeType ? { mimeType } : {});
-
-        mediaRecorder.ondataavailable = e => {
-            if (e.data.size > 0) audioChunks.push(e.data);
-        };
-
+        mediaRecorder.ondataavailable = e => { if (e.data.size > 0) audioChunks.push(e.data); };
         mediaRecorder.onstop = () => {
             stream.getTracks().forEach(t => t.stop());
             const blob = new Blob(audioChunks, { type: mimeType || "audio/webm" });
             currentAudioBlob = blob;
-            const url = URL.createObjectURL(blob);
-            audioPlayer.src = url;
+            audioPlayer.src = URL.createObjectURL(blob);
             showAudioPreview();
         };
-
         mediaRecorder.start(500);
         startTimer();
-
         recordBtn.classList.add("recording");
         recordLabel.textContent = "Apasa pentru a opri";
         recordingInfo.classList.remove("hidden");
-
     } catch (err) {
         alert("Nu s-a putut accesa microfonul. Verifica permisiunile browser-ului.\n\n" + err.message);
     }
 }
 
 function stopRecording() {
-    if (mediaRecorder && mediaRecorder.state === "recording") {
-        mediaRecorder.stop();
-    }
+    if (mediaRecorder && mediaRecorder.state === "recording") mediaRecorder.stop();
     stopTimer();
     recordBtn.classList.remove("recording");
     recordLabel.textContent = "Apasa pentru a inregistra";
@@ -116,10 +174,7 @@ function stopRecording() {
 function startTimer() {
     secondsElapsed = 0;
     updateTimerDisplay();
-    timerInterval = setInterval(() => {
-        secondsElapsed++;
-        updateTimerDisplay();
-    }, 1000);
+    timerInterval = setInterval(() => { secondsElapsed++; updateTimerDisplay(); }, 1000);
 }
 
 function stopTimer() {
@@ -134,7 +189,7 @@ function updateTimerDisplay() {
 }
 
 function getSupportedMime() {
-    const types = ["audio/webm;codecs=opus", "audio/webm", "audio/ogg;codecs=opus", "audio/mp4"];
+    const types = ["audio/webm;codecs=opus", "audio/webm", "audio/mp4", "audio/ogg;codecs=opus"];
     return types.find(t => MediaRecorder.isTypeSupported(t)) || "";
 }
 
@@ -150,21 +205,20 @@ discardBtn.addEventListener("click", () => {
     recordBtn.style.display = "";
     resultSection.classList.add("hidden");
     currentTranscriptData = null;
+    currentSummary = null;
 });
 
 // ===== TRANSCRIPTION =====
 transcribeBtn.addEventListener("click", async () => {
     if (!currentAudioBlob) return;
-
     audioPreview.classList.add("hidden");
     progressArea.classList.remove("hidden");
     resultSection.classList.add("hidden");
+    progressText.textContent = "Se trimite audio la Groq Whisper... (de obicei 5-30 sec)";
 
     const formData = new FormData();
     formData.append("audio", currentAudioBlob, "recording.webm");
     formData.append("num_speakers", numSpeakers);
-
-    progressText.textContent = "Se incarca modelul Whisper si se transcrie... Aceasta poate dura 1-2 minute la prima rulare.";
 
     try {
         const res = await fetch("/transcribe", { method: "POST", body: formData });
@@ -174,8 +228,14 @@ transcribeBtn.addEventListener("click", async () => {
         }
         const data = await res.json();
         currentTranscriptData = data;
+        currentSummary = null;
         progressArea.classList.add("hidden");
         displayResult(data);
+
+        // Auto-generate summary if available
+        if (hasApiKey) {
+            generateSummary();
+        }
     } catch (err) {
         progressArea.classList.add("hidden");
         audioPreview.classList.remove("hidden");
@@ -205,17 +265,17 @@ function displayResult(data) {
         textEl.className = "seg-text";
         textEl.textContent = seg.text;
 
-        line.appendChild(timeTag);
-        line.appendChild(speakerTag);
-        line.appendChild(textEl);
+        line.append(timeTag, speakerTag, textEl);
         transcriptContainer.appendChild(line);
     });
 
-    if (hasApiKey) {
-        summarySection.classList.remove("hidden");
-    } else {
-        summarySection.classList.add("hidden");
-    }
+    summarySection.classList.toggle("hidden", !hasApiKey);
+    summaryContent.classList.add("hidden");
+    summaryError.classList.add("hidden");
+
+    driveSaveSection.classList.toggle("hidden", !googleConnected);
+    driveResult.classList.add("hidden");
+    driveTitle.value = "";
 
     resultSection.classList.remove("hidden");
     resultSection.scrollIntoView({ behavior: "smooth", block: "start" });
@@ -236,37 +296,123 @@ function formatTime(sec) {
 }
 
 // ===== SUMMARY =====
-genSummaryBtn.addEventListener("click", async () => {
+genSummaryBtn.addEventListener("click", generateSummary);
+
+async function generateSummary() {
     if (!currentTranscriptData) return;
 
-    summaryContent.classList.remove("hidden");
     summaryLoading.classList.remove("hidden");
-    summaryText.textContent = "";
+    summaryError.classList.add("hidden");
+    summaryContent.classList.add("hidden");
     genSummaryBtn.disabled = true;
-
-    const fullText = buildFullText(currentTranscriptData.segments);
 
     try {
         const res = await fetch("/summarize", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ text: fullText }),
+            body: JSON.stringify({ segments: currentTranscriptData.segments }),
         });
         const data = await res.json();
         summaryLoading.classList.add("hidden");
-        summaryText.textContent = data.summary || "Rezumatul nu a putut fi generat.";
-        genSummaryBtn.textContent = "Regenereaza";
-        currentTranscriptData._summary = data.summary;
+
+        if (data.error) {
+            summaryError.textContent = data.error;
+            summaryError.classList.remove("hidden");
+        } else {
+            currentSummary = data;
+            renderSummary(data);
+            summaryContent.classList.remove("hidden");
+            genSummaryBtn.textContent = "Regenereaza";
+
+            // Pre-fill drive title with suggestion
+            if (data.titlu_sugerat && !driveTitle.value) {
+                driveTitle.value = data.titlu_sugerat;
+            }
+        }
     } catch (err) {
         summaryLoading.classList.add("hidden");
-        summaryText.textContent = "Eroare la generarea rezumatului.";
+        summaryError.textContent = "Eroare: " + err.message;
+        summaryError.classList.remove("hidden");
     } finally {
         genSummaryBtn.disabled = false;
     }
+}
+
+function renderSummary(data) {
+    $("rezumat-text").textContent = data.rezumat || "";
+
+    renderList("puncte-cheie-list", data.puncte_cheie, "summary-puncte-cheie");
+    renderList("intrebari-list", data.intrebari_juridice, "summary-intrebari");
+    renderList("actiuni-list", data.actiuni, "summary-actiuni");
+    renderList("termene-list", data.termene_importante, "summary-termene");
+    renderList("informatii-list", data.informatii_client, "summary-informatii");
+}
+
+function renderList(listId, items, sectionId) {
+    const list = $(listId);
+    const section = $(sectionId);
+    list.innerHTML = "";
+    if (!items || items.length === 0) {
+        section.classList.add("hidden");
+        return;
+    }
+    items.forEach(item => {
+        const li = document.createElement("li");
+        li.textContent = item;
+        list.appendChild(li);
+    });
+    section.classList.remove("hidden");
+}
+
+// ===== GOOGLE DRIVE SAVE =====
+driveSaveBtn.addEventListener("click", async () => {
+    if (!currentTranscriptData) return;
+
+    driveSaveBtn.disabled = true;
+    driveSaveBtn.textContent = "Se salveaza...";
+    driveResult.classList.add("hidden");
+
+    try {
+        const res = await fetch("/google/save", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+                segments: currentTranscriptData.segments,
+                summary: currentSummary || {},
+                timestamp: currentTranscriptData.timestamp || "",
+                duration: currentTranscriptData.duration || 0,
+                title: driveTitle.value.trim(),
+                client_folder: driveClient.value.trim(),
+            }),
+        });
+        const data = await res.json();
+
+        if (data.error) {
+            driveResult.className = "drive-result error";
+            driveResult.textContent = "Eroare: " + data.error;
+        } else {
+            driveResult.className = "drive-result";
+            driveResult.innerHTML = `
+                <strong>Salvat in Google Drive!</strong><br>
+                ${escapeHtml(data.name)}
+                <a href="${data.url}" target="_blank">Deschide documentul ↗</a>
+                <a href="${data.folder_url}" target="_blank">Deschide folder ↗</a>
+            `;
+            loadFolders();
+        }
+        driveResult.classList.remove("hidden");
+    } catch (err) {
+        driveResult.className = "drive-result error";
+        driveResult.textContent = "Eroare: " + err.message;
+        driveResult.classList.remove("hidden");
+    } finally {
+        driveSaveBtn.disabled = false;
+        driveSaveBtn.textContent = "Salveaza in Google Drive";
+    }
 });
 
-function buildFullText(segments) {
-    return (segments || []).map(s => `${s.speaker}: ${s.text}`).join("\n");
+function escapeHtml(s) {
+    return String(s).replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
 }
 
 // ===== EXPORT =====
@@ -275,23 +421,19 @@ exportPdf.addEventListener("click", () => exportDoc("pdf"));
 
 async function exportDoc(type) {
     if (!currentTranscriptData) return;
-
     const payload = {
         segments: currentTranscriptData.segments,
-        summary: currentTranscriptData._summary || "",
+        summary: currentSummary || {},
         timestamp: currentTranscriptData.timestamp || "",
         duration: currentTranscriptData.duration || 0,
     };
-
     try {
         const res = await fetch(`/export/${type}`, {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify(payload),
         });
-
         if (!res.ok) throw new Error("Export esuat");
-
         const blob = await res.blob();
         const url = URL.createObjectURL(blob);
         const a = document.createElement("a");
@@ -309,3 +451,4 @@ async function exportDoc(type) {
 
 // ===== INIT =====
 checkApiStatus();
+checkGoogleStatus();
