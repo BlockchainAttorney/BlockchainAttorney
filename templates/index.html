@@ -1,0 +1,233 @@
+<!DOCTYPE html>
+<html lang="ro">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Transcriptor AI — BlockchainLegal</title>
+    <link rel="stylesheet" href="/static/css/style.css">
+</head>
+<body>
+    <header>
+        <div class="logo">
+            <a href="/" class="logo-link">
+                <img src="/static/logo.png" alt="Blockchain Legal Association" class="logo-img">
+                <span class="logo-app-name">Transcriptor AI</span>
+            </a>
+        </div>
+        <div class="header-right">
+            <div id="api-status" class="api-badge loading">Se verifica...</div>
+            <div id="google-auth" class="google-auth">
+                <button id="google-signin-btn" class="google-btn hidden">
+                    <svg width="18" height="18" viewBox="0 0 18 18"><path fill="#4285F4" d="M17.64 9.2c0-.637-.057-1.251-.164-1.84H9v3.481h4.844a4.14 4.14 0 0 1-1.796 2.716v2.259h2.908c1.702-1.567 2.684-3.875 2.684-6.615z"/><path fill="#34A853" d="M9 18c2.43 0 4.467-.806 5.956-2.184l-2.908-2.259c-.806.54-1.836.86-3.048.86-2.344 0-4.328-1.584-5.036-3.711H.957v2.332A8.997 8.997 0 0 0 9 18z"/><path fill="#FBBC05" d="M3.964 10.706A5.41 5.41 0 0 1 3.682 9c0-.593.102-1.17.282-1.706V4.962H.957A8.996 8.996 0 0 0 0 9c0 1.452.348 2.827.957 4.038l3.007-2.332z"/><path fill="#EA4335" d="M9 3.58c1.321 0 2.508.454 3.44 1.345l2.582-2.58C13.463.891 11.426 0 9 0A8.997 8.997 0 0 0 .957 4.962L3.964 7.294C4.672 5.167 6.656 3.58 9 3.58z"/></svg>
+                    Google Drive
+                </button>
+                <div id="google-user" class="google-user hidden">
+                    <img id="google-avatar" src="" alt="">
+                    <span id="google-email"></span>
+                    <button id="google-signout-btn" class="signout-btn" title="Deconecteaza-te">×</button>
+                </div>
+            </div>
+        </div>
+    </header>
+
+    <main>
+        <!-- PROFILURI VOCALE -->
+        <section class="card voice-profile-card">
+            <div class="voice-profile-header" id="vp-toggle">
+                <div class="vp-title">
+                    <span class="vp-icon">🎤</span>
+                    <div>
+                        <strong>Profiluri vocale avocati</strong>
+                        <span class="vp-subtitle">Fiecare avocat se inregistreaza o data — aplicatia il recunoaste automat</span>
+                    </div>
+                </div>
+                <div id="vp-status" class="vp-status-badge unset">Niciun profil</div>
+                <span class="vp-chevron">›</span>
+            </div>
+
+            <div id="vp-body" class="vp-body hidden">
+
+                <!-- LISTA PROFILURI -->
+                <div id="vp-profiles-list" class="vp-profiles-list"></div>
+
+                <!-- PROFIL ACTIV SELECTAT -->
+                <div id="vp-active-row" class="vp-active-row hidden">
+                    <span class="vp-active-label">Avocat activ pentru urmatoarea inregistrare:</span>
+                    <select id="vp-active-select" class="vp-active-select"></select>
+                    <button id="vp-clear-active" class="btn-ghost-sm">Fara profil</button>
+                </div>
+
+                <!-- ADAUGA PROFIL NOU -->
+                <details id="vp-add-section" class="vp-add-section">
+                    <summary>+ Adauga avocat nou</summary>
+                    <div class="vp-add-body">
+                        <div class="form-row">
+                            <label>Numele avocatului</label>
+                            <input id="vp-name-input" type="text" placeholder="ex: Alexandru Popescu" maxlength="40">
+                        </div>
+                        <p class="vp-info">Vorbeste <strong>20-30 de secunde</strong> natural dupa ce apesi inregistrare.</p>
+
+                        <div class="vp-record-area">
+                            <button id="vp-record-btn" class="vp-btn-record">
+                                <span>🎙️</span>
+                                <span id="vp-btn-label">Incepe inregistrarea</span>
+                            </button>
+                            <div id="vp-timer-row" class="vp-timer-row hidden">
+                                <div class="pulse-ring red"></div>
+                                <span id="vp-timer">00:00</span>
+                                <span class="rec-text">SE INREGISTREAZA</span>
+                            </div>
+                        </div>
+
+                        <div id="vp-preview" class="vp-preview hidden">
+                            <audio id="vp-audio" controls></audio>
+                            <button id="vp-save-btn" class="btn-primary">Salveaza profil</button>
+                            <button id="vp-discard-btn" class="btn-ghost">Reinregistreaza</button>
+                        </div>
+
+                        <div id="vp-loading" class="vp-loading hidden">
+                            <div class="spinner-sm"></div> Se proceseaza profilul vocal...
+                        </div>
+                    </div>
+                </details>
+            </div>
+        </section>
+
+        <!-- INREGISTRARE -->
+        <section class="card record-card">
+            <h2>Inregistreaza convorbirea</h2>
+
+            <div class="speakers-select">
+                <label>Numar de vorbitori:</label>
+                <div class="speaker-btns">
+                    <button class="speaker-btn active" data-n="2">2 (Avocat + Client)</button>
+                    <button class="speaker-btn" data-n="3">3 vorbitori</button>
+                </div>
+            </div>
+
+            <div class="record-area">
+                <button id="record-btn" class="record-btn">
+                    <span class="mic-icon">🎙️</span>
+                    <span id="record-label">Apasa pentru a inregistra</span>
+                </button>
+                <div id="recording-info" class="recording-info hidden">
+                    <div class="pulse-ring"></div>
+                    <span id="timer">00:00</span>
+                    <span class="rec-text">SE INREGISTREAZA</span>
+                </div>
+            </div>
+
+            <div id="audio-preview" class="audio-preview hidden">
+                <audio id="audio-player" controls></audio>
+                <button id="transcribe-btn" class="btn-primary">Transcrie inregistrarea</button>
+                <button id="discard-btn" class="btn-ghost">Sterge si reinregistreaza</button>
+            </div>
+
+            <div id="progress-area" class="progress-area hidden">
+                <div class="spinner"></div>
+                <p id="progress-text">Se transcrie...</p>
+            </div>
+        </section>
+
+        <!-- REZULTAT -->
+        <section id="result-section" class="card result-card hidden">
+            <div class="result-header">
+                <h2>Rezultat</h2>
+                <div class="result-meta">
+                    <span id="meta-duration" class="meta-chip">--</span>
+                    <span id="meta-lang" class="meta-chip">--</span>
+                    <span id="meta-diarization" class="meta-chip hidden">Diarizare vocala</span>
+                </div>
+            </div>
+
+            <!-- REZUMAT AI STRUCTURAT -->
+            <div id="summary-section" class="summary-box hidden">
+                <div class="summary-header">
+                    <span class="ai-badge">AI</span>
+                    <h3>Analiza convorbire</h3>
+                    <button id="gen-summary-btn" class="btn-sm">Genereaza analiza</button>
+                </div>
+                <div id="summary-loading" class="summary-loading hidden">
+                    <div class="spinner-sm"></div> Se analizeaza convorbirea...
+                </div>
+                <div id="summary-error" class="summary-error hidden"></div>
+                <div id="summary-content" class="summary-content hidden">
+                    <div id="summary-rezumat" class="summary-section">
+                        <h4>Rezumat</h4>
+                        <p id="rezumat-text"></p>
+                    </div>
+                    <div id="summary-puncte-cheie" class="summary-section hidden">
+                        <h4>Puncte cheie discutate</h4>
+                        <ul id="puncte-cheie-list"></ul>
+                    </div>
+                    <div id="summary-intrebari" class="summary-section hidden">
+                        <h4>Intrebari / Aspecte juridice</h4>
+                        <ul id="intrebari-list"></ul>
+                    </div>
+                    <div id="summary-actiuni" class="summary-section hidden">
+                        <h4>Actiuni necesare</h4>
+                        <ul id="actiuni-list"></ul>
+                    </div>
+                    <div id="summary-termene" class="summary-section hidden">
+                        <h4>Termene importante</h4>
+                        <ul id="termene-list"></ul>
+                    </div>
+                    <div id="summary-informatii" class="summary-section hidden">
+                        <h4>Informatii despre client</h4>
+                        <ul id="informatii-list"></ul>
+                    </div>
+                </div>
+            </div>
+
+            <!-- TRANSCRIPT -->
+            <details class="transcript-wrapper" open>
+                <summary>Transcript complet</summary>
+                <div class="transcript-toolbar">
+                    <div id="postprocess-loading" class="summary-loading hidden">
+                        <div class="spinner-sm"></div> Se corecteaza transcriptul...
+                    </div>
+                    <button id="postprocess-btn" class="btn-sm" title="Corecteaza erorile de transcriere cu Claude AI">
+                        <span class="ai-badge" style="margin-right:5px; font-size:9px;">AI</span>Corecție transcriere
+                    </button>
+                </div>
+                <div id="transcript-container" class="transcript-container"></div>
+            </details>
+
+            <!-- SALVARE GOOGLE DRIVE -->
+            <div id="drive-save-section" class="drive-save-section hidden">
+                <h3>Salveaza in Google Drive</h3>
+                <div class="drive-form">
+                    <div class="form-row">
+                        <label>Titlu document <span class="muted">(AI sugereaza automat)</span></label>
+                        <input id="drive-title" type="text" placeholder="ex: Consultatie initiala dispute wallet">
+                    </div>
+                    <div class="form-row">
+                        <label>Client / Dosar <span class="muted">(optional — creeaza subfolder)</span></label>
+                        <input id="drive-client" type="text" list="folders-list" placeholder="ex: SC Crypto SRL">
+                        <datalist id="folders-list"></datalist>
+                    </div>
+                    <button id="drive-save-btn" class="btn-drive">Salveaza in Google Drive</button>
+                </div>
+                <div id="drive-result" class="drive-result hidden"></div>
+            </div>
+
+            <!-- EXPORT LOCAL -->
+            <div class="export-bar">
+                <span class="export-label">Sau descarca local:</span>
+                <button id="export-word" class="btn-export btn-word">Word (.docx)</button>
+                <button id="export-pdf" class="btn-export btn-pdf">PDF</button>
+            </div>
+        </section>
+    </main>
+
+    <footer>
+        <div class="footer-inner">
+            <img src="/static/logo.png" alt="Blockchain Legal Association" class="footer-logo">
+            <p class="footer-tagline">Transcriptor AI &bull; Powered by Groq Whisper + Claude AI</p>
+            <p class="footer-contact">Contact: <a href="mailto:asociatia@blockchainlegal.tech">asociatia@blockchainlegal.tech</a></p>
+        </div>
+    </footer>
+
+    <script src="/static/js/app.js"></script>
+</body>
+</html>
