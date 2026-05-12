@@ -56,8 +56,8 @@ WHISPER_LEGAL_PROMPT = (
     "executor judecătoresc, executare silită, poprire, sechestru, lichidator, "
     "administrator judiciar, insolvență, faliment, ICCJ, Curtea de Apel, parchet, "
     "DNA, DIICOT, procuror, rechizitoriu, trimitere în judecată, achitare, condamnare, "
-    "suspendare, amânare, peremptoriu, decădere, tardiv, inadmisibil, nefondat, admis, "
-    "respins, calitate procesuală, legitimare, competență, excepție, întâmpinare, cerere reconvențională."
+    "suspendare, amânare, inadmisibil, nefondat, calitate procesuală, competență, "
+    "excepție, întâmpinare, cerere reconvențională."
 )
 
 # Post-procesare Claude — corector strict, fara adaugiri sau interpretari
