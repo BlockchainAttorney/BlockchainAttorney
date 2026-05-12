@@ -699,8 +699,6 @@ def transcribe():
             result["segments"] = _fallback_speakers(result["segments"], num_speakers, voice_fingerprint is not None)
             result["diarization_used"] = False
 
-        result["segments"] = post_process_transcript(result["segments"])
-
         session_id = str(uuid.uuid4())[:8]
         timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M")
         result["session_id"] = session_id
@@ -775,6 +773,18 @@ def summarize():
     transcript_text = "\n".join(f"{s.get('speaker', 'Vorbitor')}: {s.get('text', '')}" for s in segments)
     summary = generate_summary(transcript_text)
     return jsonify(summary)
+
+
+@app.route("/postprocess", methods=["POST"])
+def postprocess():
+    data = request.get_json()
+    segments = data.get("segments", [])
+    if not segments:
+        return jsonify({"error": "Transcript gol"}), 400
+    if not ANTHROPIC_API_KEY:
+        return jsonify({"error": "Adauga ANTHROPIC_API_KEY in .env pentru corectie AI"}), 400
+    corrected = post_process_transcript(segments)
+    return jsonify({"segments": corrected})
 
 
 @app.route("/export/word", methods=["POST"])

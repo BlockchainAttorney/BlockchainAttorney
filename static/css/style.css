@@ -55,10 +55,7 @@ header {
     height: 48px;
     width: auto;
     display: block;
-    filter: drop-shadow(0 1px 4px rgba(0,0,0,0.25));
-    background: var(--white);
-    border-radius: 6px;
-    padding: 3px 8px;
+    filter: drop-shadow(0 0 6px rgba(255,255,255,0.9)) drop-shadow(0 1px 3px rgba(0,0,0,0.3));
 }
 .logo-app-name {
     font-size: 17px;
@@ -428,6 +425,16 @@ main {
     outline: none;
 }
 .transcript-wrapper summary:hover { color: var(--blue); }
+
+.transcript-toolbar {
+    display: flex;
+    align-items: center;
+    justify-content: flex-end;
+    gap: 10px;
+    padding: 6px 0 4px;
+    border-bottom: 1px solid var(--gray-200);
+    margin-bottom: 4px;
+}
 
 .transcript-container {
     display: flex;

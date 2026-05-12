@@ -182,6 +182,14 @@
             <!-- TRANSCRIPT -->
             <details class="transcript-wrapper" open>
                 <summary>Transcript complet</summary>
+                <div class="transcript-toolbar">
+                    <div id="postprocess-loading" class="summary-loading hidden">
+                        <div class="spinner-sm"></div> Se corecteaza transcriptul...
+                    </div>
+                    <button id="postprocess-btn" class="btn-sm" title="Corecteaza erorile de transcriere cu Claude AI">
+                        <span class="ai-badge" style="margin-right:5px; font-size:9px;">AI</span>Corecție transcriere
+                    </button>
+                </div>
                 <div id="transcript-container" class="transcript-container"></div>
             </details>
 

@@ -266,8 +266,23 @@ function displayResult(data) {
         metaDiarization.classList.add("hidden");
     }
 
+    renderTranscript(data.segments || []);
+
+    summarySection.classList.toggle("hidden", !hasApiKey);
+    summaryContent.classList.add("hidden");
+    summaryError.classList.add("hidden");
+
+    driveSaveSection.classList.toggle("hidden", !googleConnected);
+    driveResult.classList.add("hidden");
+    driveTitle.value = "";
+
+    resultSection.classList.remove("hidden");
+    resultSection.scrollIntoView({ behavior: "smooth", block: "start" });
+}
+
+function renderTranscript(segments) {
     transcriptContainer.innerHTML = "";
-    (data.segments || []).forEach(seg => {
+    segments.forEach(seg => {
         const line = document.createElement("div");
         line.className = "transcript-line";
 
@@ -286,17 +301,6 @@ function displayResult(data) {
         line.append(timeTag, speakerTag, textEl);
         transcriptContainer.appendChild(line);
     });
-
-    summarySection.classList.toggle("hidden", !hasApiKey);
-    summaryContent.classList.add("hidden");
-    summaryError.classList.add("hidden");
-
-    driveSaveSection.classList.toggle("hidden", !googleConnected);
-    driveResult.classList.add("hidden");
-    driveTitle.value = "";
-
-    resultSection.classList.remove("hidden");
-    resultSection.scrollIntoView({ behavior: "smooth", block: "start" });
 }
 
 function getSpeakerClass(speaker) {
@@ -689,6 +693,34 @@ vpSaveBtn.addEventListener("click", async () => {
         vpPreview.classList.remove("hidden");
     } finally {
         vpLoading.classList.add("hidden");
+    }
+});
+
+// ===== POST-PROCESS =====
+const postprocessBtn     = $("postprocess-btn");
+const postprocessLoading = $("postprocess-loading");
+
+postprocessBtn.addEventListener("click", async () => {
+    if (!currentTranscriptData) return;
+    postprocessBtn.disabled = true;
+    postprocessLoading.classList.remove("hidden");
+
+    try {
+        const res = await fetch("/postprocess", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ segments: currentTranscriptData.segments }),
+        });
+        const data = await res.json();
+        if (data.error) throw new Error(data.error);
+        currentTranscriptData.segments = data.segments;
+        renderTranscript(data.segments);
+        postprocessBtn.textContent = "Corectat ✓";
+    } catch (err) {
+        alert("Eroare la corecție AI: " + err.message);
+        postprocessBtn.disabled = false;
+    } finally {
+        postprocessLoading.classList.add("hidden");
     }
 });
 
