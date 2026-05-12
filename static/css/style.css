@@ -53,11 +53,8 @@ header {
 .logo { display: flex; align-items: center; }
 .logo-link { display: flex; align-items: center; gap: 14px; text-decoration: none; }
 .logo-img {
-    height: 60px;
-    width: 300px;
-    max-width: 50vw;
-    object-fit: cover;
-    object-position: center center;
+    height: 56px;
+    width: auto;
     display: block;
 }
 .logo-app-name {
@@ -68,7 +65,7 @@ header {
     border-left: 2px solid var(--gray-200);
     padding-left: 14px;
 }
-@media (max-width: 500px) { .logo-app-name { display: none; } .logo-img { height: 50px; width: 220px; } }
+@media (max-width: 500px) { .logo-app-name { display: none; } .logo-img { height: 40px; } }
 
 .header-right { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
 
@@ -770,11 +767,9 @@ footer {
     gap: 10px;
 }
 .footer-logo {
-    height: 90px;
-    width: 520px;
+    height: 70px;
+    width: auto;
     max-width: 90vw;
-    object-fit: cover;
-    object-position: center center;
     opacity: 0.9;
 }
 .footer-tagline {
