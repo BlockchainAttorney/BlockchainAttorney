@@ -49,18 +49,18 @@ header {
     flex-wrap: wrap;
 }
 
-.logo { display: flex; align-items: center; gap: 12px; }
-.logo-emblem {
-    width: 40px; height: 40px;
-    background: var(--blue);
-    border-radius: 10px;
-    display: flex; align-items: center; justify-content: center;
-    font-size: 22px;
-    color: var(--white);
-    flex-shrink: 0;
+.logo { display: flex; align-items: center; }
+.logo-link { display: flex; align-items: center; gap: 14px; text-decoration: none; }
+.logo-img { height: 44px; width: auto; display: block; }
+.logo-app-name {
+    font-size: 17px;
+    font-weight: 800;
+    color: var(--blue);
+    letter-spacing: -0.3px;
+    border-left: 2px solid var(--gray-200);
+    padding-left: 14px;
 }
-.logo-title { display: block; font-size: 18px; font-weight: 800; color: var(--blue); letter-spacing: -0.3px; }
-.logo-sub { display: block; font-size: 11px; color: var(--gray-600); letter-spacing: 0.3px; font-weight: 500; }
+@media (max-width: 500px) { .logo-app-name { display: none; } .logo-img { height: 36px; } }
 
 .header-right { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
 
