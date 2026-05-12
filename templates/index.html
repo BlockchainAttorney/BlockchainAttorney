@@ -95,7 +95,7 @@
 
         <!-- INREGISTRARE -->
         <section class="card record-card">
-            <h2>Inregistreaza convorbirea</h2>
+            <h2>Inregistreaza sau incarca audio</h2>
 
             <div class="speakers-select">
                 <label>Numar de vorbitori:</label>
@@ -105,15 +105,40 @@
                 </div>
             </div>
 
-            <div class="record-area">
-                <button id="record-btn" class="record-btn">
-                    <span class="mic-icon">🎙️</span>
-                    <span id="record-label">Apasa pentru a inregistra</span>
-                </button>
-                <div id="recording-info" class="recording-info hidden">
-                    <div class="pulse-ring"></div>
-                    <span id="timer">00:00</span>
-                    <span class="rec-text">SE INREGISTREAZA</span>
+            <!-- INPUT MODE TABS -->
+            <div class="input-tabs">
+                <button class="input-tab active" data-mode="record">🎙️ Inregistreaza</button>
+                <button class="input-tab" data-mode="upload">📁 Incarca fisier</button>
+            </div>
+
+            <!-- RECORD MODE -->
+            <div id="mode-record">
+                <div class="record-area">
+                    <button id="record-btn" class="record-btn">
+                        <span class="mic-icon">🎙️</span>
+                        <span id="record-label">Apasa pentru a inregistra</span>
+                    </button>
+                    <div id="recording-info" class="recording-info hidden">
+                        <div class="pulse-ring"></div>
+                        <span id="timer">00:00</span>
+                        <span class="rec-text">SE INREGISTREAZA</span>
+                    </div>
+                </div>
+            </div>
+
+            <!-- UPLOAD MODE -->
+            <div id="mode-upload" class="hidden">
+                <div class="upload-area" id="upload-dropzone">
+                    <input type="file" id="upload-input" accept=".mp3,.wav,.m4a,.ogg,.webm,.flac,.aac,.mp4,.mpeg" class="upload-input-hidden">
+                    <div class="upload-icon">📂</div>
+                    <p class="upload-text">Trage fisierul audio aici sau <button class="upload-browse-btn" id="upload-browse-btn">alege fisier</button></p>
+                    <p class="upload-formats">MP3, WAV, M4A, OGG, FLAC, AAC — max 100 MB</p>
+                </div>
+                <div id="upload-chosen" class="upload-chosen hidden">
+                    <span class="upload-file-icon">🎵</span>
+                    <span id="upload-filename" class="upload-filename"></span>
+                    <span id="upload-filesize" class="upload-filesize"></span>
+                    <button id="upload-clear-btn" class="upload-clear-btn" title="Sterge">✕</button>
                 </div>
             </div>
 
@@ -186,10 +211,12 @@
                     <div id="postprocess-loading" class="summary-loading hidden">
                         <div class="spinner-sm"></div> Se corecteaza transcriptul...
                     </div>
+                    <button id="copy-transcript-btn" class="btn-sm btn-sm-outline" title="Copiaza transcriptul complet">Copiaza tot</button>
                     <button id="postprocess-btn" class="btn-sm" title="Corecteaza erorile de transcriere cu Claude AI">
                         <span class="ai-badge" style="margin-right:5px; font-size:9px;">AI</span>Corecție transcriere
                     </button>
                 </div>
+                <p class="transcript-edit-hint">Apasa pe orice text pentru a-l edita manual.</p>
                 <div id="transcript-container" class="transcript-container"></div>
             </details>
 

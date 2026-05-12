@@ -11,6 +11,7 @@ let hasApiKey = false;
 let googleConfigured = false;
 let googleConnected = false;
 let currentAudioBlob = null;
+let inputMode = "record"; // "record" | "upload"
 
 // Voice profile
 let vpMediaRecorder = null;
@@ -129,6 +130,83 @@ async function loadFolders() {
     } catch {}
 }
 
+// ===== INPUT TABS =====
+document.querySelectorAll(".input-tab").forEach(tab => {
+    tab.addEventListener("click", () => {
+        document.querySelectorAll(".input-tab").forEach(t => t.classList.remove("active"));
+        tab.classList.add("active");
+        inputMode = tab.dataset.mode;
+        $("mode-record").classList.toggle("hidden", inputMode !== "record");
+        $("mode-upload").classList.toggle("hidden", inputMode !== "upload");
+        // Reset both sides when switching
+        currentAudioBlob = null;
+        audioPlayer.src = "";
+        audioPreview.classList.add("hidden");
+        recordBtn.style.display = "";
+    });
+});
+
+// ===== FILE UPLOAD =====
+const uploadInput     = $("upload-input");
+const uploadDropzone  = $("upload-dropzone");
+const uploadBrowseBtn = $("upload-browse-btn");
+const uploadChosen    = $("upload-chosen");
+const uploadFilename  = $("upload-filename");
+const uploadFilesize  = $("upload-filesize");
+const uploadClearBtn  = $("upload-clear-btn");
+
+uploadBrowseBtn.addEventListener("click", (e) => { e.stopPropagation(); uploadInput.click(); });
+uploadDropzone.addEventListener("click", () => uploadInput.click());
+
+uploadInput.addEventListener("change", () => {
+    if (uploadInput.files[0]) handleUploadFile(uploadInput.files[0]);
+});
+
+uploadDropzone.addEventListener("dragover", (e) => { e.preventDefault(); uploadDropzone.classList.add("drag-over"); });
+uploadDropzone.addEventListener("dragleave", () => uploadDropzone.classList.remove("drag-over"));
+uploadDropzone.addEventListener("drop", (e) => {
+    e.preventDefault();
+    uploadDropzone.classList.remove("drag-over");
+    const file = e.dataTransfer.files[0];
+    if (file) handleUploadFile(file);
+});
+
+function handleUploadFile(file) {
+    const allowed = ["audio/mpeg", "audio/wav", "audio/mp4", "audio/ogg", "audio/webm",
+                     "audio/flac", "audio/aac", "audio/x-m4a", "video/mp4", "audio/x-flac"];
+    const ext = file.name.split(".").pop().toLowerCase();
+    const allowedExts = ["mp3","wav","m4a","ogg","webm","flac","aac","mp4","mpeg"];
+    if (!allowed.includes(file.type) && !allowedExts.includes(ext)) {
+        alert("Fisierul trebuie sa fie audio (MP3, WAV, M4A, OGG, FLAC, AAC).");
+        return;
+    }
+    if (file.size > 100 * 1024 * 1024) {
+        alert("Fisierul depaseste 100 MB. Foloseste un fisier mai mic.");
+        return;
+    }
+    currentAudioBlob = file;
+    uploadFilename.textContent = file.name;
+    uploadFilesize.textContent = formatFileSize(file.size);
+    uploadChosen.classList.remove("hidden");
+    uploadDropzone.classList.add("hidden");
+    audioPlayer.src = URL.createObjectURL(file);
+    audioPreview.classList.remove("hidden");
+}
+
+uploadClearBtn.addEventListener("click", () => {
+    currentAudioBlob = null;
+    audioPlayer.src = "";
+    uploadInput.value = "";
+    uploadChosen.classList.add("hidden");
+    uploadDropzone.classList.remove("hidden");
+    audioPreview.classList.add("hidden");
+});
+
+function formatFileSize(bytes) {
+    if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(0) + " KB";
+    return (bytes / (1024 * 1024)).toFixed(1) + " MB";
+}
+
 // ===== SPEAKER SELECTION =====
 document.querySelectorAll(".speaker-btn").forEach(btn => {
     btn.addEventListener("click", () => {
@@ -202,7 +280,7 @@ function getSupportedMime() {
 }
 
 function showAudioPreview() {
-    recordBtn.style.display = "none";
+    if (inputMode === "record") recordBtn.style.display = "none";
     audioPreview.classList.remove("hidden");
 }
 
@@ -210,10 +288,16 @@ discardBtn.addEventListener("click", () => {
     currentAudioBlob = null;
     audioPlayer.src = "";
     audioPreview.classList.add("hidden");
-    recordBtn.style.display = "";
     resultSection.classList.add("hidden");
     currentTranscriptData = null;
     currentSummary = null;
+    if (inputMode === "record") {
+        recordBtn.style.display = "";
+    } else {
+        uploadInput.value = "";
+        uploadChosen.classList.add("hidden");
+        uploadDropzone.classList.remove("hidden");
+    }
 });
 
 // ===== TRANSCRIPTION =====
@@ -224,12 +308,17 @@ transcribeBtn.addEventListener("click", async () => {
     resultSection.classList.add("hidden");
 
     const activeFP = getActiveFP();
-    progressText.textContent = activeFP
-        ? `Se transcrie si se identifica vorbitorii (activ: ${localStorage.getItem(VP_ACTIVE_KEY)})...`
-        : "Se trimite audio la Groq Whisper... (de obicei 5-30 sec)";
+    if (activeFP) {
+        progressText.textContent = `Se transcrie si se identifica vorbitorii (activ: ${localStorage.getItem(VP_ACTIVE_KEY)})...`;
+    } else if (inputMode === "upload") {
+        progressText.textContent = "Se incarca si transcrie fisierul... (poate dura 10-60 sec in functie de marime)";
+    } else {
+        progressText.textContent = "Se trimite audio la Groq Whisper... (de obicei 5-30 sec)";
+    }
 
     const formData = new FormData();
-    formData.append("audio", currentAudioBlob, "recording.webm");
+    const filename = (inputMode === "upload" && currentAudioBlob.name) ? currentAudioBlob.name : "recording.webm";
+    formData.append("audio", currentAudioBlob, filename);
     formData.append("num_speakers", numSpeakers);
     if (activeFP) formData.append("voice_fingerprint", JSON.stringify(activeFP));
 
@@ -267,6 +356,7 @@ function displayResult(data) {
     }
 
     renderTranscript(data.segments || []);
+    copyTranscriptBtn.textContent = "Copiaza tot";
 
     summarySection.classList.toggle("hidden", !hasApiKey);
     summaryContent.classList.add("hidden");
@@ -282,7 +372,7 @@ function displayResult(data) {
 
 function renderTranscript(segments) {
     transcriptContainer.innerHTML = "";
-    segments.forEach(seg => {
+    segments.forEach((seg, idx) => {
         const line = document.createElement("div");
         line.className = "transcript-line";
 
@@ -296,7 +386,21 @@ function renderTranscript(segments) {
 
         const textEl = document.createElement("span");
         textEl.className = "seg-text";
+        textEl.contentEditable = "true";
+        textEl.spellcheck = true;
         textEl.textContent = seg.text;
+        textEl.dataset.idx = idx;
+        textEl.title = "Click pentru a edita";
+
+        textEl.addEventListener("input", () => {
+            if (currentTranscriptData && currentTranscriptData.segments[idx] !== undefined) {
+                currentTranscriptData.segments[idx].text = textEl.textContent;
+            }
+        });
+
+        textEl.addEventListener("keydown", (e) => {
+            if (e.key === "Enter") { e.preventDefault(); textEl.blur(); }
+        });
 
         line.append(timeTag, speakerTag, textEl);
         transcriptContainer.appendChild(line);
@@ -693,6 +797,34 @@ vpSaveBtn.addEventListener("click", async () => {
         vpPreview.classList.remove("hidden");
     } finally {
         vpLoading.classList.add("hidden");
+    }
+});
+
+// ===== COPY TRANSCRIPT =====
+const copyTranscriptBtn = $("copy-transcript-btn");
+
+copyTranscriptBtn.addEventListener("click", async () => {
+    if (!currentTranscriptData) return;
+    const text = currentTranscriptData.segments
+        .map(s => `[${formatTime(s.start)}] ${s.speaker}: ${s.text}`)
+        .join("\n");
+    try {
+        await navigator.clipboard.writeText(text);
+        copyTranscriptBtn.textContent = "Copiat ✓";
+        setTimeout(() => { copyTranscriptBtn.textContent = "Copiaza tot"; }, 2000);
+    } catch {
+        // Fallback for browsers without clipboard API
+        const ta = document.createElement("textarea");
+        ta.value = text;
+        ta.style.position = "fixed";
+        ta.style.opacity = "0";
+        document.body.appendChild(ta);
+        ta.focus();
+        ta.select();
+        document.execCommand("copy");
+        document.body.removeChild(ta);
+        copyTranscriptBtn.textContent = "Copiat ✓";
+        setTimeout(() => { copyTranscriptBtn.textContent = "Copiaza tot"; }, 2000);
     }
 });
 
