@@ -45,6 +45,51 @@ GOOGLE_SCOPES = [
 
 # ===== TRANSCRIERE =====
 
+# Vocabular juridic general — ghideaza Whisper spre termeni specifici domeniului
+WHISPER_LEGAL_PROMPT = (
+    "Transcript convorbire juridică. "
+    "Termeni: dosar, tribunal, judecătorie, instanță, complet de judecată, reclamant, pârât, "
+    "inculpat, parte vătămată, martor, expert, probă, înscris, interogatoriu, depoziție, "
+    "sentință, decizie, hotărâre judecătorească, apel, recurs, căi de atac, prescripție, "
+    "termen, citație, somație, notificare, contract, clauză, nulitate, reziliere, "
+    "daune, despăgubiri, penalități, garanție, ipotecă, gaj, cesiune, procură, mandat, "
+    "executor judecătoresc, executare silită, poprire, sechestru, lichidator, "
+    "administrator judiciar, insolvență, faliment, ICCJ, Curtea de Apel, parchet, "
+    "DNA, DIICOT, procuror, rechizitoriu, trimitere în judecată, achitare, condamnare, "
+    "suspendare, amânare, peremptoriu, decădere, tardiv, inadmisibil, nefondat, admis, "
+    "respins, calitate procesuală, legitimare, competență, excepție, întâmpinare, cerere reconvențională."
+)
+
+# Post-procesare Claude — corector strict, fara adaugiri sau interpretari
+POSTPROCESS_PROMPT = """Ești un corector tehnic de transcrieri audio în limba română. \
+Primești segmente dintr-o transcriere automată și corectezi EXCLUSIV erorile evidente de recunoaștere vocală.
+
+REGULI ABSOLUTE:
+1. NU adăuga nicio informație care nu există deja în text
+2. NU reformula, nu parafrazeza, nu completa propoziții
+3. NU schimba înțelesul sau ordinea ideilor
+4. NU "îmbunătăți" stilul — lasă limbajul vorbitorului intact
+5. Corectează NUMAI: cuvinte greșite fonetic (sunau similar dar sunt altceva), \
+erori clare de punctuație, capitalizarea numelor proprii și instituțiilor
+6. Dacă nu ești 100% sigur că e eroare de transcriere, lasă NESCHIMBAT
+7. Răspunde cu un JSON array cu același număr de elemente ca inputul, fiecare element \
+fiind textul corectat al segmentului corespunzător
+
+Exemple de corecții permise:
+- "vânzare cumpărare" → "vânzare-cumpărare"
+- "judecătoria sectorului doi" → "Judecătoria Sectorului 2"
+- "a depus o plânjere" → "a depus o plângere"
+- "prescripția extinctivă" rămâne neschimbat (corect deja)
+
+Exemple de ce NU faci:
+- "am nevoie de" → NU completa ce urmează
+- "contractul" → NU adăuga detalii despre contract
+- orice interpretare a contextului juridic
+
+Input (JSON array de texte):
+"""
+
+
 def get_groq_client():
     if not GROQ_API_KEY:
         raise RuntimeError("GROQ_API_KEY lipseste. Adauga cheia in .env (https://console.groq.com)")
@@ -62,6 +107,7 @@ def transcribe_audio(audio_path: str) -> dict:
             response_format="verbose_json",
             language=LANGUAGE,
             temperature=0.0,
+            prompt=WHISPER_LEGAL_PROMPT,
         )
 
     segments_raw = getattr(transcription, "segments", None) or []
@@ -170,6 +216,35 @@ def diarize_audio(audio_path: str, num_speakers: int, voice_fingerprint: list = 
             label_map = {i: f"Vorbitor {i+1}" for i in range(num_speakers)}
 
     return [(s[0], s[1], label_map.get(s[2], "Vorbitor")) for s in merged]
+
+
+def post_process_transcript(segments: list) -> list:
+    """Use Claude to fix transcription errors — strictly no additions or rewriting."""
+    if not ANTHROPIC_API_KEY or not segments:
+        return segments
+    try:
+        import anthropic
+        texts = [s.get("text", "") for s in segments]
+        client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
+        message = client.messages.create(
+            model="claude-sonnet-4-6",
+            max_tokens=4096,
+            messages=[{
+                "role": "user",
+                "content": POSTPROCESS_PROMPT + json.dumps(texts, ensure_ascii=False),
+            }],
+        )
+        raw = message.content[0].text.strip()
+
+        # Extract JSON array from response
+        match = re.search(r"\[.*\]", raw, re.DOTALL)
+        if match:
+            corrected = json.loads(match.group(0))
+            if isinstance(corrected, list) and len(corrected) == len(segments):
+                return [{**s, "text": corrected[i]} for i, s in enumerate(segments)]
+    except Exception as e:
+        print(f"[PostProcess] Eroare: {e}")
+    return segments  # Return original on any failure
 
 
 def align_diarization(groq_segments: list, diarization: list) -> list:
@@ -623,6 +698,8 @@ def transcribe():
             # Fallback: simple pause-based if diarization failed
             result["segments"] = _fallback_speakers(result["segments"], num_speakers, voice_fingerprint is not None)
             result["diarization_used"] = False
+
+        result["segments"] = post_process_transcript(result["segments"])
 
         session_id = str(uuid.uuid4())[:8]
         timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M")
