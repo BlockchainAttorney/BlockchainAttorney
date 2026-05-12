@@ -50,9 +50,17 @@ header {
 }
 
 .logo { display: flex; align-items: center; gap: 12px; }
-.logo-icon { font-size: 28px; }
-.logo-title { display: block; font-size: 18px; font-weight: 700; color: var(--blue); }
-.logo-sub { display: block; font-size: 11px; color: var(--gray-600); letter-spacing: 0.5px; }
+.logo-emblem {
+    width: 40px; height: 40px;
+    background: var(--blue);
+    border-radius: 10px;
+    display: flex; align-items: center; justify-content: center;
+    font-size: 22px;
+    color: var(--white);
+    flex-shrink: 0;
+}
+.logo-title { display: block; font-size: 18px; font-weight: 800; color: var(--blue); letter-spacing: -0.3px; }
+.logo-sub { display: block; font-size: 11px; color: var(--gray-600); letter-spacing: 0.3px; font-weight: 500; }
 
 .header-right { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
 
@@ -543,6 +551,103 @@ main {
 .btn-pdf { background: #c62828; color: var(--white); }
 .btn-pdf:hover { background: #9b1b1b; }
 
+/* ===== VOICE PROFILE ===== */
+.voice-profile-card { padding: 0; overflow: hidden; }
+
+.voice-profile-header {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 16px 20px;
+    cursor: pointer;
+    user-select: none;
+    transition: background 0.15s;
+}
+.voice-profile-header:hover { background: var(--gray-50); }
+
+.vp-title { display: flex; align-items: center; gap: 12px; flex: 1; }
+.vp-icon { font-size: 22px; }
+.vp-title strong { font-size: 14px; font-weight: 700; display: block; }
+.vp-subtitle { font-size: 12px; color: var(--gray-600); }
+
+.vp-status-badge {
+    font-size: 11px;
+    font-weight: 700;
+    padding: 3px 10px;
+    border-radius: 20px;
+    white-space: nowrap;
+}
+.vp-status-badge.unset { background: var(--gray-100); color: var(--gray-600); border: 1px solid var(--gray-200); }
+.vp-status-badge.set { background: var(--green-light); color: var(--green); border: 1px solid #c8e6c9; }
+
+.vp-chevron { font-size: 20px; color: var(--gray-400); transition: transform 0.2s; }
+.vp-chevron.open { transform: rotate(90deg); }
+
+.vp-body {
+    padding: 0 20px 20px;
+    border-top: 1px solid var(--gray-200);
+}
+
+.vp-info {
+    font-size: 13px;
+    color: var(--gray-600);
+    line-height: 1.6;
+    margin: 14px 0;
+}
+
+.vp-record-area { display: flex; align-items: center; gap: 16px; flex-wrap: wrap; margin-bottom: 14px; }
+
+.vp-btn-record {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    background: var(--blue);
+    color: var(--white);
+    border: none;
+    padding: 10px 20px;
+    border-radius: 8px;
+    font-size: 14px;
+    font-weight: 600;
+    cursor: pointer;
+    transition: all 0.15s;
+}
+.vp-btn-record:hover { background: var(--blue-dark); }
+.vp-btn-record.recording { background: var(--red); }
+
+.vp-timer-row { display: flex; align-items: center; gap: 8px; font-weight: 700; color: var(--red); }
+#vp-timer { font-size: 20px; font-variant-numeric: tabular-nums; }
+
+.pulse-ring.red { background: var(--red); }
+
+.vp-preview { display: flex; flex-direction: column; gap: 10px; }
+.vp-preview audio { width: 100%; max-width: 420px; }
+
+.vp-loading { display: flex; align-items: center; gap: 8px; font-size: 13px; color: var(--gray-600); margin-top: 8px; }
+
+.vp-saved {
+    margin-top: 8px;
+    padding: 10px 14px;
+    background: var(--green-light);
+    border: 1px solid #c8e6c9;
+    border-radius: 6px;
+    font-size: 13px;
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    flex-wrap: wrap;
+}
+
+.btn-ghost-sm {
+    background: transparent;
+    color: var(--gray-600);
+    border: 1px solid var(--gray-200);
+    padding: 4px 10px;
+    border-radius: 6px;
+    font-size: 12px;
+    cursor: pointer;
+}
+.btn-ghost-sm:hover { color: var(--red); border-color: var(--red); }
+
 /* ===== FOOTER ===== */
 footer {
     text-align: center;
@@ -551,6 +656,8 @@ footer {
     color: var(--gray-400);
     border-top: 1px solid var(--gray-200);
 }
+footer a { color: var(--gray-400); text-decoration: none; }
+footer a:hover { color: var(--blue); }
 
 /* ===== HELPERS ===== */
 .hidden { display: none !important; }

@@ -9,3 +9,7 @@ google-auth==2.36.0
 google-auth-oauthlib==1.2.1
 google-auth-httplib2==0.2.0
 google-api-python-client==2.151.0
+librosa==0.10.2
+scikit-learn==1.5.2
+numpy==1.26.4
+soundfile==0.12.1

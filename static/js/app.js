@@ -1,4 +1,4 @@
-/* Transcriptor AI — BlockchainAttorney */
+/* Transcriptor AI — Asociatia BlockchainLegal */
 
 let mediaRecorder = null;
 let audioChunks = [];
@@ -11,6 +11,14 @@ let hasApiKey = false;
 let googleConfigured = false;
 let googleConnected = false;
 let currentAudioBlob = null;
+
+// Voice profile
+let vpMediaRecorder = null;
+let vpAudioChunks = [];
+let vpTimerInterval = null;
+let vpSeconds = 0;
+let vpAudioBlob = null;
+const VP_KEY = "bl_voice_fingerprint";
 
 // ===== DOM =====
 const $ = id => document.getElementById(id);
@@ -214,11 +222,16 @@ transcribeBtn.addEventListener("click", async () => {
     audioPreview.classList.add("hidden");
     progressArea.classList.remove("hidden");
     resultSection.classList.add("hidden");
-    progressText.textContent = "Se trimite audio la Groq Whisper... (de obicei 5-30 sec)";
+
+    const storedFP = localStorage.getItem(VP_KEY);
+    progressText.textContent = storedFP
+        ? "Se transcrie si se identifica vorbitorii dupa voce..."
+        : "Se trimite audio la Groq Whisper... (de obicei 5-30 sec)";
 
     const formData = new FormData();
     formData.append("audio", currentAudioBlob, "recording.webm");
     formData.append("num_speakers", numSpeakers);
+    if (storedFP) formData.append("voice_fingerprint", storedFP);
 
     try {
         const res = await fetch("/transcribe", { method: "POST", body: formData });
@@ -247,6 +260,11 @@ transcribeBtn.addEventListener("click", async () => {
 function displayResult(data) {
     metaDuration.textContent = formatTime(data.duration || 0);
     metaLang.textContent = (data.language || "ro").toUpperCase();
+    if (data.diarization_used) {
+        metaDiarization.classList.remove("hidden");
+    } else {
+        metaDiarization.classList.add("hidden");
+    }
 
     transcriptContainer.innerHTML = "";
     (data.segments || []).forEach(seg => {
@@ -449,6 +467,117 @@ async function exportDoc(type) {
     }
 }
 
+// ===== VOICE PROFILE =====
+const vpToggle      = $("vp-toggle");
+const vpBody        = $("vp-body");
+const vpChevron     = vpToggle.querySelector(".vp-chevron");
+const vpStatus      = $("vp-status");
+const vpRecordBtn   = $("vp-record-btn");
+const vpBtnLabel    = $("vp-btn-label");
+const vpTimerRow    = $("vp-timer-row");
+const vpTimerEl     = $("vp-timer");
+const vpPreview     = $("vp-preview");
+const vpAudioEl     = $("vp-audio");
+const vpSaveBtn     = $("vp-save-btn");
+const vpDiscardBtn  = $("vp-discard-btn");
+const vpLoading     = $("vp-loading");
+const vpSaved       = $("vp-saved");
+const vpResetBtn    = $("vp-reset-btn");
+const metaDiarization = $("meta-diarization");
+
+vpToggle.addEventListener("click", () => {
+    const open = !vpBody.classList.contains("hidden");
+    vpBody.classList.toggle("hidden", open);
+    vpChevron.classList.toggle("open", !open);
+});
+
+function initVoiceProfileUI() {
+    const fp = localStorage.getItem(VP_KEY);
+    if (fp) {
+        vpStatus.textContent = "Voce inregistrata ✓";
+        vpStatus.className = "vp-status-badge set";
+        vpSaved.classList.remove("hidden");
+        vpPreview.classList.add("hidden");
+    } else {
+        vpStatus.textContent = "Neinregistrat";
+        vpStatus.className = "vp-status-badge unset";
+        vpSaved.classList.add("hidden");
+    }
+}
+
+vpRecordBtn.addEventListener("click", async () => {
+    if (vpMediaRecorder && vpMediaRecorder.state === "recording") {
+        vpMediaRecorder.stop();
+        clearInterval(vpTimerInterval);
+        vpTimerRow.classList.add("hidden");
+        vpRecordBtn.classList.remove("recording");
+        vpBtnLabel.textContent = "Incepe inregistrarea";
+    } else {
+        try {
+            const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+            vpAudioChunks = [];
+            const mime = getSupportedMime();
+            vpMediaRecorder = new MediaRecorder(stream, mime ? { mimeType: mime } : {});
+            vpMediaRecorder.ondataavailable = e => { if (e.data.size > 0) vpAudioChunks.push(e.data); };
+            vpMediaRecorder.onstop = () => {
+                stream.getTracks().forEach(t => t.stop());
+                vpAudioBlob = new Blob(vpAudioChunks, { type: mime || "audio/webm" });
+                vpAudioEl.src = URL.createObjectURL(vpAudioBlob);
+                vpPreview.classList.remove("hidden");
+                vpSaved.classList.add("hidden");
+            };
+            vpMediaRecorder.start(500);
+            vpSeconds = 0;
+            vpTimerEl.textContent = "00:00";
+            vpTimerRow.classList.remove("hidden");
+            vpRecordBtn.classList.add("recording");
+            vpBtnLabel.textContent = "Opreste (min 20 sec)";
+            vpTimerInterval = setInterval(() => {
+                vpSeconds++;
+                const m = String(Math.floor(vpSeconds / 60)).padStart(2, "0");
+                const s = String(vpSeconds % 60).padStart(2, "0");
+                vpTimerEl.textContent = `${m}:${s}`;
+            }, 1000);
+        } catch (err) {
+            alert("Nu s-a putut accesa microfonul: " + err.message);
+        }
+    }
+});
+
+vpDiscardBtn.addEventListener("click", () => {
+    vpAudioBlob = null;
+    vpAudioEl.src = "";
+    vpPreview.classList.add("hidden");
+});
+
+vpSaveBtn.addEventListener("click", async () => {
+    if (!vpAudioBlob) return;
+    vpLoading.classList.remove("hidden");
+    vpPreview.classList.add("hidden");
+
+    const formData = new FormData();
+    formData.append("audio", vpAudioBlob, "voice_sample.webm");
+
+    try {
+        const res = await fetch("/voice/register", { method: "POST", body: formData });
+        const data = await res.json();
+        if (data.error) throw new Error(data.error);
+        localStorage.setItem(VP_KEY, JSON.stringify(data.fingerprint));
+        initVoiceProfileUI();
+    } catch (err) {
+        alert("Eroare la salvarea profilului: " + err.message);
+        vpPreview.classList.remove("hidden");
+    } finally {
+        vpLoading.classList.add("hidden");
+    }
+});
+
+vpResetBtn.addEventListener("click", () => {
+    localStorage.removeItem(VP_KEY);
+    initVoiceProfileUI();
+});
+
 // ===== INIT =====
 checkApiStatus();
 checkGoogleStatus();
+initVoiceProfileUI();

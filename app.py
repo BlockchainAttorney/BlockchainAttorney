@@ -94,19 +94,99 @@ def transcribe_audio(audio_path: str) -> dict:
     }
 
 
-def assign_speakers(segments: list, num_speakers: int = 2) -> list:
-    if not segments:
-        return segments
-    speaker_labels = ["Avocat", "Client"] if num_speakers == 2 else [f"Vorbitor {i+1}" for i in range(num_speakers)]
-    current_speaker = 0
-    updated = []
-    for i, seg in enumerate(segments):
-        if i > 0:
-            pause = seg["start"] - segments[i - 1]["end"]
-            if pause > 1.2:
-                current_speaker = (current_speaker + 1) % len(speaker_labels)
-        updated.append({**seg, "speaker": speaker_labels[current_speaker]})
-    return updated
+def extract_voice_fingerprint(audio_path: str) -> list:
+    """Extract MFCC-based voice fingerprint (20 coefficients mean vector)."""
+    import librosa
+    import numpy as np
+    y, sr = librosa.load(audio_path, sr=16000, mono=True, duration=30)
+    mfcc = librosa.feature.mfcc(y=y, sr=sr, n_mfcc=20)
+    return np.mean(mfcc, axis=1).tolist()
+
+
+def diarize_audio(audio_path: str, num_speakers: int, voice_fingerprint: list = None) -> list:
+    """
+    Speaker diarization via MFCC + KMeans clustering.
+    Returns list of (start_sec, end_sec, speaker_label) tuples.
+    If voice_fingerprint provided, auto-labels lawyer's voice as 'Avocat'.
+    """
+    import librosa
+    import numpy as np
+    from sklearn.cluster import KMeans
+
+    try:
+        y, sr = librosa.load(audio_path, sr=16000, mono=True)
+    except Exception as e:
+        print(f"[Diarize] Nu pot incarca audio: {e}")
+        return []
+
+    hop_length = int(sr * 0.4)  # ~400ms frames
+    mfcc = librosa.feature.mfcc(y=y, sr=sr, n_mfcc=20, hop_length=hop_length)
+    mfcc = mfcc.T  # [n_frames, 20]
+
+    if len(mfcc) < num_speakers * 4:
+        return []
+
+    kmeans = KMeans(n_clusters=num_speakers, random_state=42, n_init=10)
+    labels = kmeans.fit_predict(mfcc)
+
+    # Group consecutive frames into segments
+    frame_dur = hop_length / sr
+    raw_segs = []
+    current = int(labels[0])
+    start_idx = 0
+    for i, label in enumerate(labels[1:], 1):
+        if int(label) != current:
+            raw_segs.append([start_idx * frame_dur, i * frame_dur, current])
+            current = int(label)
+            start_idx = i
+    raw_segs.append([start_idx * frame_dur, len(labels) * frame_dur, current])
+
+    # Merge very short segments (< 0.8s) with neighbours
+    merged = []
+    for seg in raw_segs:
+        if merged and (seg[1] - seg[0]) < 0.8:
+            prev = merged[-1]
+            if prev[2] == seg[2]:
+                prev[1] = seg[1]
+                continue
+        merged.append(seg)
+
+    # Build speaker label map
+    if voice_fingerprint and len(voice_fingerprint) == 20:
+        fp = np.array(voice_fingerprint)
+        centroids = kmeans.cluster_centers_
+        sims = [float(np.dot(fp, c) / (np.linalg.norm(fp) * np.linalg.norm(c) + 1e-8)) for c in centroids]
+        avocat_idx = int(np.argmax(sims))
+        label_map = {avocat_idx: "Avocat"}
+        client_n = 1
+        for i in range(num_speakers):
+            if i != avocat_idx:
+                label_map[i] = "Client" if num_speakers == 2 else f"Client {client_n}"
+                client_n += 1
+    else:
+        if num_speakers == 2:
+            label_map = {0: "Vorbitor 1", 1: "Vorbitor 2"}
+        else:
+            label_map = {i: f"Vorbitor {i+1}" for i in range(num_speakers)}
+
+    return [(s[0], s[1], label_map.get(s[2], "Vorbitor")) for s in merged]
+
+
+def align_diarization(groq_segments: list, diarization: list) -> list:
+    """Map speaker labels from diarization onto Groq transcript segments by overlap."""
+    if not diarization:
+        return groq_segments
+    result = []
+    for seg in groq_segments:
+        best_overlap = -1.0
+        speaker = "Vorbitor"
+        for d_start, d_end, d_spk in diarization:
+            overlap = max(0.0, min(seg["end"], d_end) - max(seg["start"], d_start))
+            if overlap > best_overlap:
+                best_overlap = overlap
+                speaker = d_spk
+        result.append({**seg, "speaker": speaker})
+    return result
 
 
 # ===== REZUMAT AI =====
@@ -522,9 +602,27 @@ def transcribe():
         audio_file.save(tmp.name)
         tmp_path = tmp.name
 
+    # Optional voice fingerprint for lawyer auto-detection
+    voice_fp_raw = request.form.get("voice_fingerprint", "")
+    voice_fingerprint = None
+    if voice_fp_raw:
+        try:
+            voice_fingerprint = json.loads(voice_fp_raw)
+        except Exception:
+            pass
+
     try:
         result = transcribe_audio(tmp_path)
-        result["segments"] = assign_speakers(result["segments"], num_speakers)
+
+        # Speaker diarization (voice-based)
+        diarization = diarize_audio(tmp_path, num_speakers, voice_fingerprint)
+        if diarization:
+            result["segments"] = align_diarization(result["segments"], diarization)
+            result["diarization_used"] = True
+        else:
+            # Fallback: simple pause-based if diarization failed
+            result["segments"] = _fallback_speakers(result["segments"], num_speakers, voice_fingerprint is not None)
+            result["diarization_used"] = False
 
         session_id = str(uuid.uuid4())[:8]
         timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M")
@@ -540,6 +638,47 @@ def transcribe():
 
         return jsonify(result)
 
+    except Exception as e:
+        traceback.print_exc()
+        return jsonify({"error": str(e)}), 500
+    finally:
+        try:
+            os.unlink(tmp_path)
+        except Exception:
+            pass
+
+
+def _fallback_speakers(segments: list, num_speakers: int, has_profile: bool) -> list:
+    """Simple pause-based fallback when diarization fails."""
+    if not segments:
+        return segments
+    if has_profile:
+        labels = ["Avocat"] + [f"Client {i}" if num_speakers > 2 else "Client" for i in range(1, num_speakers)]
+    else:
+        labels = [f"Vorbitor {i+1}" for i in range(num_speakers)]
+    current = 0
+    result = []
+    for i, seg in enumerate(segments):
+        if i > 0 and seg["start"] - segments[i-1]["end"] > 1.2:
+            current = (current + 1) % num_speakers
+        result.append({**seg, "speaker": labels[current]})
+    return result
+
+
+@app.route("/voice/register", methods=["POST"])
+def voice_register():
+    """Extract voice fingerprint from a recorded sample."""
+    if "audio" not in request.files:
+        return jsonify({"error": "Niciun fisier audio"}), 400
+
+    audio_file = request.files["audio"]
+    with tempfile.NamedTemporaryFile(suffix=".webm", delete=False) as tmp:
+        audio_file.save(tmp.name)
+        tmp_path = tmp.name
+
+    try:
+        fingerprint = extract_voice_fingerprint(tmp_path)
+        return jsonify({"fingerprint": fingerprint, "ok": True})
     except Exception as e:
         traceback.print_exc()
         return jsonify({"error": str(e)}), 500
