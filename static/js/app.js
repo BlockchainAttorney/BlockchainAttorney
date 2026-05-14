@@ -11,7 +11,20 @@ let hasApiKey = false;
 let googleConfigured = false;
 let googleConnected = false;
 let currentAudioBlob = null;
-let inputMode = "record"; // "record" | "upload"
+let inputMode = "record"; // "record" | "live" | "upload"
+let selectedModel = "whisper-large-v3";
+
+// ===== LIVE MODE STATE =====
+let liveMediaRecorder = null;
+let liveAllChunks = [];      // tot audio-ul (pentru blob final)
+let liveIntervalChunks = []; // chunk-ul curent (60s)
+let liveTimerInterval = null;
+let liveChunkInterval = null;
+let liveSeconds = 0;
+let liveTimeOffset = 0;      // offset-ul pentru chunk-ul curent
+let liveSegments = [];       // toate segmentele acumulate
+let liveMimeType = "";
+const LIVE_CHUNK_SECS = 60;
 
 // Voice profile
 let vpMediaRecorder = null;
@@ -130,6 +143,15 @@ async function loadFolders() {
     } catch {}
 }
 
+// ===== SPEED SELECTOR =====
+document.querySelectorAll(".speed-btn").forEach(btn => {
+    btn.addEventListener("click", () => {
+        document.querySelectorAll(".speed-btn").forEach(b => b.classList.remove("active"));
+        btn.classList.add("active");
+        selectedModel = btn.dataset.model;
+    });
+});
+
 // ===== INPUT TABS =====
 document.querySelectorAll(".input-tab").forEach(tab => {
     tab.addEventListener("click", () => {
@@ -137,12 +159,12 @@ document.querySelectorAll(".input-tab").forEach(tab => {
         tab.classList.add("active");
         inputMode = tab.dataset.mode;
         $("mode-record").classList.toggle("hidden", inputMode !== "record");
+        $("mode-live").classList.toggle("hidden", inputMode !== "live");
         $("mode-upload").classList.toggle("hidden", inputMode !== "upload");
-        // Reset both sides when switching
         currentAudioBlob = null;
         audioPlayer.src = "";
         audioPreview.classList.add("hidden");
-        recordBtn.style.display = "";
+        if (inputMode === "record") recordBtn.style.display = "";
     });
 });
 
@@ -300,6 +322,205 @@ discardBtn.addEventListener("click", () => {
     }
 });
 
+// ===== LIVE MODE =====
+const liveRecordBtn   = $("live-record-btn");
+const liveRecordLabel = $("live-record-label");
+const liveRecordingInfo = $("live-recording-info");
+const liveTimerEl     = $("live-timer");
+const liveNextChunk   = $("live-next-chunk");
+const liveStatus      = $("live-status");
+
+liveRecordBtn.addEventListener("click", async () => {
+    if (liveMediaRecorder && liveMediaRecorder.state === "recording") {
+        await stopLiveRecording();
+    } else {
+        await startLiveRecording();
+    }
+});
+
+async function startLiveRecording() {
+    try {
+        const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+        liveAllChunks = [];
+        liveIntervalChunks = [];
+        liveSegments = [];
+        liveSeconds = 0;
+        liveTimeOffset = 0;
+        liveMimeType = getSupportedMime();
+
+        liveMediaRecorder = new MediaRecorder(stream, liveMimeType ? { mimeType: liveMimeType } : {});
+        liveMediaRecorder.ondataavailable = e => {
+            if (e.data.size > 0) {
+                liveAllChunks.push(e.data);
+                liveIntervalChunks.push(e.data);
+            }
+        };
+        liveMediaRecorder.start(500);
+
+        // Show live transcript area immediately
+        resultSection.classList.remove("hidden");
+        transcriptContainer.innerHTML = "<p class='live-waiting'>⏳ Se ascultă... Primul transcript apare după 60 sec.</p>";
+        summarySection.classList.add("hidden");
+        summaryContent.classList.add("hidden");
+        driveSaveSection.classList.add("hidden");
+        copyTranscriptBtn.textContent = "Copiaza tot";
+
+        liveRecordBtn.classList.add("recording");
+        liveRecordLabel.textContent = "Opreste transcrierea";
+        liveRecordingInfo.classList.remove("hidden");
+
+        // Timer
+        liveTimerInterval = setInterval(() => {
+            liveSeconds++;
+            const m = String(Math.floor(liveSeconds / 60)).padStart(2, "0");
+            const s = String(liveSeconds % 60).padStart(2, "0");
+            liveTimerEl.textContent = `${m}:${s}`;
+            // Countdown to next chunk
+            const secsInChunk = liveSeconds - Math.floor(liveSeconds / LIVE_CHUNK_SECS) * LIVE_CHUNK_SECS;
+            const remaining = LIVE_CHUNK_SECS - (secsInChunk % LIVE_CHUNK_SECS);
+            liveNextChunk.textContent = `următor chunk: ${remaining}s`;
+        }, 1000);
+
+        // Send chunk every 60 seconds
+        liveChunkInterval = setInterval(() => sendLiveChunk(), LIVE_CHUNK_SECS * 1000);
+
+    } catch (err) {
+        alert("Nu s-a putut accesa microfonul:\n" + err.message);
+    }
+}
+
+async function sendLiveChunk() {
+    if (!liveIntervalChunks.length) return;
+
+    const chunkBlob = new Blob([...liveIntervalChunks], { type: liveMimeType || "audio/webm" });
+    const offset = liveTimeOffset;
+    liveIntervalChunks = [];
+    liveTimeOffset = liveSeconds;
+
+    // Indicator procesare
+    const waitingEl = transcriptContainer.querySelector(".live-waiting");
+    if (waitingEl) waitingEl.remove();
+
+    const indicator = document.createElement("div");
+    indicator.className = "live-chunk-indicator";
+    indicator.textContent = `⏳ Se procesează ${formatTime(offset)}–${formatTime(liveSeconds)}...`;
+    transcriptContainer.appendChild(indicator);
+    transcriptContainer.scrollTop = transcriptContainer.scrollHeight;
+
+    const formData = new FormData();
+    formData.append("audio", chunkBlob, "chunk.webm");
+    formData.append("offset", offset);
+    formData.append("model", selectedModel);
+
+    try {
+        const res = await fetch("/transcribe-chunk", { method: "POST", body: formData });
+        indicator.remove();
+
+        if (!res.ok) {
+            const err = await res.json().catch(() => ({}));
+            const errEl = document.createElement("div");
+            errEl.className = "live-chunk-error";
+            errEl.textContent = `❌ Eroare chunk ${formatTime(offset)}: ${err.error || res.status}`;
+            transcriptContainer.appendChild(errEl);
+            return;
+        }
+
+        const data = await res.json();
+        if (data.segments && data.segments.length > 0) {
+            liveSegments.push(...data.segments);
+            data.segments.forEach(seg => {
+                transcriptContainer.appendChild(createTranscriptLine(seg));
+            });
+            transcriptContainer.scrollTop = transcriptContainer.scrollHeight;
+
+            if (data.hallucinations_removed > 0) {
+                liveStatus.textContent = `ℹ️ ${data.hallucinations_removed} fraze irelevante filtrate automat`;
+                liveStatus.classList.remove("hidden");
+            }
+        }
+    } catch (err) {
+        indicator.remove();
+        const errEl = document.createElement("div");
+        errEl.className = "live-chunk-error";
+        errEl.textContent = `❌ Eroare rețea la ${formatTime(offset)}`;
+        transcriptContainer.appendChild(errEl);
+    }
+}
+
+async function stopLiveRecording() {
+    clearInterval(liveTimerInterval);
+    clearInterval(liveChunkInterval);
+
+    // Send final chunk
+    await sendLiveChunk();
+
+    if (liveMediaRecorder && liveMediaRecorder.state !== "inactive") {
+        liveMediaRecorder.stop();
+        liveMediaRecorder.stream.getTracks().forEach(t => t.stop());
+    }
+
+    liveRecordBtn.classList.remove("recording");
+    liveRecordLabel.textContent = "Porneste transcrierea live";
+    liveRecordingInfo.classList.add("hidden");
+
+    // Build full audio blob for diarization/export
+    currentAudioBlob = new Blob(liveAllChunks, { type: liveMimeType || "audio/webm" });
+    audioPlayer.src = URL.createObjectURL(currentAudioBlob);
+
+    const timestamp = new Date().toISOString().slice(0, 16).replace("T", "_").replace(":", "-");
+    currentTranscriptData = {
+        segments: liveSegments,
+        duration: liveSeconds,
+        language: "ro",
+        diarization_used: false,
+        timestamp,
+        session_id: "live-" + Date.now().toString(36),
+    };
+    currentSummary = null;
+
+    // Update meta chips
+    metaDuration.textContent = formatTime(liveSeconds);
+    metaLang.textContent = "RO";
+    metaDiarization.classList.add("hidden");
+
+    // Show export/summary options
+    summarySection.classList.toggle("hidden", !hasApiKey);
+    summaryContent.classList.add("hidden");
+    summaryError.classList.add("hidden");
+    driveSaveSection.classList.toggle("hidden", !googleConnected);
+    driveResult.classList.add("hidden");
+    driveTitle.value = "";
+
+    if (hasApiKey && liveSegments.length > 0) {
+        generateSummary();
+    }
+}
+
+function createTranscriptLine(seg) {
+    const line = document.createElement("div");
+    line.className = "transcript-line";
+
+    const timeTag = document.createElement("span");
+    timeTag.className = "time-tag";
+    timeTag.textContent = formatTime(seg.start);
+
+    const speakerTag = document.createElement("span");
+    speakerTag.className = "speaker-tag " + getSpeakerClass(seg.speaker);
+    speakerTag.textContent = seg.speaker;
+
+    const textEl = document.createElement("span");
+    textEl.className = "seg-text";
+    textEl.contentEditable = "true";
+    textEl.spellcheck = true;
+    textEl.textContent = seg.text;
+    textEl.title = "Click pentru a edita";
+    textEl.addEventListener("input", () => { seg.text = textEl.textContent; });
+    textEl.addEventListener("keydown", e => { if (e.key === "Enter") { e.preventDefault(); textEl.blur(); } });
+
+    line.append(timeTag, speakerTag, textEl);
+    return line;
+}
+
 // ===== TRANSCRIPTION =====
 transcribeBtn.addEventListener("click", async () => {
     if (!currentAudioBlob) return;
@@ -320,6 +541,7 @@ transcribeBtn.addEventListener("click", async () => {
     const filename = (inputMode === "upload" && currentAudioBlob.name) ? currentAudioBlob.name : "recording.webm";
     formData.append("audio", currentAudioBlob, filename);
     formData.append("num_speakers", numSpeakers);
+    formData.append("model", selectedModel);
     if (activeFP) formData.append("voice_fingerprint", JSON.stringify(activeFP));
 
     try {
@@ -332,6 +554,15 @@ transcribeBtn.addEventListener("click", async () => {
         currentTranscriptData = data;
         currentSummary = null;
         progressArea.classList.add("hidden");
+        if (data.hallucinations_removed > 0) {
+            progressText.textContent = "";
+            const note = document.createElement("p");
+            note.className = "hallucination-note";
+            note.textContent = `ℹ️ ${data.hallucinations_removed} fraze irelevante filtrate automat (halucinații Whisper)`;
+            progressArea.appendChild(note);
+            progressArea.classList.remove("hidden");
+            setTimeout(() => progressArea.classList.add("hidden"), 4000);
+        }
         displayResult(data);
 
         // Auto-generate summary if available
@@ -372,39 +603,7 @@ function displayResult(data) {
 
 function renderTranscript(segments) {
     transcriptContainer.innerHTML = "";
-    segments.forEach((seg, idx) => {
-        const line = document.createElement("div");
-        line.className = "transcript-line";
-
-        const timeTag = document.createElement("span");
-        timeTag.className = "time-tag";
-        timeTag.textContent = formatTime(seg.start);
-
-        const speakerTag = document.createElement("span");
-        speakerTag.className = "speaker-tag " + getSpeakerClass(seg.speaker);
-        speakerTag.textContent = seg.speaker;
-
-        const textEl = document.createElement("span");
-        textEl.className = "seg-text";
-        textEl.contentEditable = "true";
-        textEl.spellcheck = true;
-        textEl.textContent = seg.text;
-        textEl.dataset.idx = idx;
-        textEl.title = "Click pentru a edita";
-
-        textEl.addEventListener("input", () => {
-            if (currentTranscriptData && currentTranscriptData.segments[idx] !== undefined) {
-                currentTranscriptData.segments[idx].text = textEl.textContent;
-            }
-        });
-
-        textEl.addEventListener("keydown", (e) => {
-            if (e.key === "Enter") { e.preventDefault(); textEl.blur(); }
-        });
-
-        line.append(timeTag, speakerTag, textEl);
-        transcriptContainer.appendChild(line);
-    });
+    segments.forEach(seg => transcriptContainer.appendChild(createTranscriptLine(seg)));
 }
 
 function getSpeakerClass(speaker) {

@@ -11,16 +11,15 @@ from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from datetime import datetime
 
-from flask import Flask, request, jsonify, render_template, send_file, redirect, url_for, session, g
+from flask import Flask, request, jsonify, render_template, send_file, redirect, session, g
 from dotenv import load_dotenv
 
 load_dotenv()
 
 app = Flask(__name__)
-app.config["MAX_CONTENT_LENGTH"] = 100 * 1024 * 1024  # 100MB max upload
+app.config["MAX_CONTENT_LENGTH"] = 200 * 1024 * 1024  # 200MB max upload
 app.secret_key = os.getenv("FLASK_SECRET_KEY", "schimba-aceasta-cheie-in-productie-" + str(uuid.uuid4()))
 
-# Allow OAuth over HTTP for local development
 if os.getenv("FLASK_ENV", "development") == "development":
     os.environ["OAUTHLIB_INSECURE_TRANSPORT"] = "1"
 
@@ -39,20 +38,14 @@ def _setup_logging():
     )
     root = logging.getLogger()
     root.setLevel(logging.INFO)
-
-    # Console handler (visible in Render logs)
     ch = logging.StreamHandler()
     ch.setFormatter(fmt)
     root.addHandler(ch)
-
-    # Rotating file handler (10 MB × 5 fișiere = 50 MB max)
     if LOGS_DIR:
         try:
             fh = RotatingFileHandler(
-                LOGS_DIR / "app.log",
-                maxBytes=10 * 1024 * 1024,
-                backupCount=5,
-                encoding="utf-8",
+                LOGS_DIR / "app.log", maxBytes=10 * 1024 * 1024,
+                backupCount=5, encoding="utf-8",
             )
             fh.setFormatter(fmt)
             root.addHandler(fh)
@@ -72,6 +65,7 @@ LANGUAGE = os.getenv("LANGUAGE", "ro")
 GROQ_API_KEY = os.getenv("GROQ_API_KEY", "")
 ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")
 GROQ_MODEL = os.getenv("GROQ_MODEL", "whisper-large-v3")
+GROQ_MAX_BYTES = 24 * 1024 * 1024  # 24 MB — Groq limit is 25 MB
 
 GOOGLE_CLIENT_ID = os.getenv("GOOGLE_CLIENT_ID", "")
 GOOGLE_CLIENT_SECRET = os.getenv("GOOGLE_CLIENT_SECRET", "")
@@ -83,7 +77,6 @@ GOOGLE_SCOPES = [
     "openid",
 ]
 
-
 # ===== REQUEST LOGGING MIDDLEWARE =====
 
 @app.before_request
@@ -93,10 +86,10 @@ def _before():
 
 @app.after_request
 def _after(response):
-    duration_ms = int((time.time() - g.start_time) * 1000)
-    level = logging.WARNING if response.status_code >= 400 else logging.INFO
-    log.log(level, "[%s] %s %s → %d (%dms)",
-            g.req_id, request.method, request.path, response.status_code, duration_ms)
+    ms = int((time.time() - g.start_time) * 1000)
+    lvl = logging.WARNING if response.status_code >= 400 else logging.INFO
+    log.log(lvl, "[%s] %s %s → %d (%dms)",
+            g.req_id, request.method, request.path, response.status_code, ms)
     return response
 
 @app.errorhandler(Exception)
@@ -107,8 +100,76 @@ def _unhandled(e):
 
 @app.errorhandler(413)
 def _too_large(e):
-    log.warning("Upload prea mare (>100MB)")
-    return jsonify({"error": "Fișierul depășește 100 MB. Comprimați înregistrarea și încercați din nou."}), 413
+    log.warning("Upload prea mare (>200MB)")
+    return jsonify({"error": "Fișierul depășește 200 MB."}), 413
+
+
+# ===== HALUCINAȚII WHISPER =====
+# Fraze inventate de Whisper când detectează tăcere sau zgomot de fond
+
+HALLUCINATION_PHRASES = [
+    "mulțumesc pentru vizionare",
+    "abonați-vă la canal",
+    "dați like și abonați",
+    "ne vedem în episodul",
+    "vă mulțumesc că ați urmărit",
+    "urmăriți în continuare",
+    "canal de youtube",
+    "pe youtube",
+    "thank you for watching",
+    "please subscribe",
+    "like and subscribe",
+    "don't forget to subscribe",
+    "see you in the next",
+    "see you next time",
+    "copyright",
+    "music by",
+    "subtitles by",
+    "captions by",
+    "translated by",
+    "www.",
+    "http://",
+    "https://",
+    ".com",
+    ".ro",
+    "transcript provided by",
+    "transcribed by",
+]
+
+
+def filter_hallucinations(segments: list) -> tuple:
+    """Remove Whisper hallucinations. Returns (clean_segments, removed_count)."""
+    clean = []
+    removed = 0
+    prev_text_low = ""
+
+    for seg in segments:
+        text = seg.get("text", "").strip()
+        text_low = text.lower()
+
+        if not text_low:
+            removed += 1
+            continue
+
+        # Known hallucination phrases
+        if any(p in text_low for p in HALLUCINATION_PHRASES):
+            log.warning("Halucination eliminată: %.120s", text)
+            removed += 1
+            continue
+
+        # Whisper loop: segment identic cu precedentul
+        if text_low == prev_text_low:
+            log.warning("Segment duplicat eliminat: %.80s", text)
+            removed += 1
+            continue
+
+        prev_text_low = text_low
+        clean.append(seg)
+
+    if removed:
+        log.info("Filtrare: %d halucinations eliminate din %d segmente",
+                 removed, removed + len(clean))
+    return clean, removed
 
 
 # ===== TRANSCRIERE =====
@@ -135,44 +196,31 @@ REGULI ABSOLUTE:
 2. NU reformula, nu parafrazeza, nu completa propoziții
 3. NU schimba înțelesul sau ordinea ideilor
 4. NU "îmbunătăți" stilul — lasă limbajul vorbitorului intact
-5. Corectează NUMAI: cuvinte greșite fonetic (sunau similar dar sunt altceva), \
-erori clare de punctuație, capitalizarea numelor proprii și instituțiilor
+5. Corectează NUMAI: cuvinte greșite fonetic, erori clare de punctuație, capitalizare
 6. Dacă nu ești 100% sigur că e eroare de transcriere, lasă NESCHIMBAT
-7. Răspunde cu un JSON array cu același număr de elemente ca inputul, fiecare element \
-fiind textul corectat al segmentului corespunzător
-
-Exemple de corecții permise:
-- "vânzare cumpărare" → "vânzare-cumpărare"
-- "judecătoria sectorului doi" → "Judecătoria Sectorului 2"
-- "a depus o plânjere" → "a depus o plângere"
-- "prescripția extinctivă" rămâne neschimbat (corect deja)
-
-Exemple de ce NU faci:
-- "am nevoie de" → NU completa ce urmează
-- "contractul" → NU adăuga detalii despre contract
-- orice interpretare a contextului juridic
+7. Răspunde cu un JSON array cu același număr de elemente ca inputul
 
 Input (JSON array de texte):
 """
 
 
-def get_groq_client():
+def get_groq_client(model_override=None):
     if not GROQ_API_KEY:
         raise RuntimeError("GROQ_API_KEY lipsește. Adaugă cheia în .env (https://console.groq.com)")
     from groq import Groq
-    return Groq(api_key=GROQ_API_KEY)
+    return Groq(api_key=GROQ_API_KEY), model_override or GROQ_MODEL
 
 
-def transcribe_audio(audio_path: str) -> dict:
-    t0 = time.time()
-    client = get_groq_client()
+def _call_groq_transcribe(audio_path: str, model: str) -> dict:
+    """Single Groq API call for one file."""
+    client, model = get_groq_client(model)
     file_size = os.path.getsize(audio_path)
-    log.info("Transcriere start — fișier: %.1f MB, model: %s", file_size / 1_048_576, GROQ_MODEL)
+    log.info("Groq transcribe — fișier: %.1f MB, model: %s", file_size / 1_048_576, model)
 
-    with open(audio_path, "rb") as audio_file:
+    with open(audio_path, "rb") as f:
         transcription = client.audio.transcriptions.create(
-            file=(os.path.basename(audio_path), audio_file.read()),
-            model=GROQ_MODEL,
+            file=(os.path.basename(audio_path), f.read()),
+            model=model,
             response_format="verbose_json",
             language=LANGUAGE,
             temperature=0.0,
@@ -197,15 +245,133 @@ def transcribe_audio(audio_path: str) -> dict:
     duration = getattr(transcription, "duration", 0) or (result_segments[-1]["end"] if result_segments else 0)
     language = getattr(transcription, "language", LANGUAGE) or LANGUAGE
 
-    elapsed = time.time() - t0
-    log.info("Transcriere finalizată — %d segmente, %.1f sec audio, în %.1fs",
-             len(result_segments), float(duration), elapsed)
-
     return {
         "segments": result_segments,
         "full_text": full_text,
         "language": language,
         "duration": round(float(duration), 2),
+    }
+
+
+def _audio_to_wav(src_path: str) -> str:
+    """Convert any audio format to 16kHz mono WAV using librosa+soundfile.
+    Returns path to WAV temp file (caller must delete)."""
+    import librosa
+    import soundfile as sf
+    y, sr = librosa.load(src_path, sr=16000, mono=True)
+    tmp = tempfile.NamedTemporaryFile(suffix=".wav", delete=False)
+    sf.write(tmp.name, y, sr)
+    tmp.close()
+    return tmp.name
+
+
+def transcribe_audio(audio_path: str, model: str = None) -> dict:
+    """Transcribe audio — splits into chunks if file > 24 MB, filters hallucinations."""
+    t0 = time.time()
+    file_size = os.path.getsize(audio_path)
+    model = model or GROQ_MODEL
+
+    if file_size <= GROQ_MAX_BYTES:
+        # Small file — send directly
+        try:
+            result = _call_groq_transcribe(audio_path, model)
+        except Exception as e:
+            # Format might be incompatible — try converting to WAV first
+            err_str = str(e).lower()
+            if any(k in err_str for k in ["format", "codec", "invalid", "unsupported", "decode"]):
+                log.warning("Format incompatibil, convertesc la WAV: %s", e)
+                wav_path = _audio_to_wav(audio_path)
+                try:
+                    result = _call_groq_transcribe(wav_path, model)
+                finally:
+                    try:
+                        os.unlink(wav_path)
+                    except Exception:
+                        pass
+            else:
+                raise
+
+        segs, removed = filter_hallucinations(result["segments"])
+        result["segments"] = segs
+        result["hallucinations_removed"] = removed
+        log.info("Transcriere gata — %d segmente, %.1f sec, în %.1fs",
+                 len(segs), result["duration"], time.time() - t0)
+        return result
+
+    # Large file — split into chunks
+    return _transcribe_chunked(audio_path, model, t0)
+
+
+def _transcribe_chunked(audio_path: str, model: str, t0: float) -> dict:
+    """Split large audio into 5-min WAV chunks, transcribe each, merge."""
+    import librosa
+    import soundfile as sf
+    import numpy as np
+
+    file_size = os.path.getsize(audio_path)
+    log.info("Fișier mare (%.1f MB) — transcriere în bucăți", file_size / 1_048_576)
+
+    try:
+        y, sr = librosa.load(audio_path, sr=16000, mono=True)
+    except Exception as e:
+        log.warning("librosa load eșuat (%s) — încerc conversie WAV", e)
+        wav_path = _audio_to_wav(audio_path)
+        try:
+            y, sr = librosa.load(wav_path, sr=16000, mono=True)
+        finally:
+            try:
+                os.unlink(wav_path)
+            except Exception:
+                pass
+
+    chunk_secs = 300  # 5 minutes per chunk
+    chunk_samples = chunk_secs * sr
+    total_duration = len(y) / sr
+    n_chunks = max(1, int(np.ceil(len(y) / chunk_samples)))
+    log.info("Împărțit în %d bucăți de ~%ds (total %.0fs)", n_chunks, chunk_secs, total_duration)
+
+    all_segments = []
+    full_text_parts = []
+    language = LANGUAGE
+    chunks_ok = 0
+
+    for i in range(n_chunks):
+        start_s = i * chunk_samples
+        end_s = min((i + 1) * chunk_samples, len(y))
+        chunk_y = y[start_s:end_s]
+        time_offset = start_s / sr
+
+        chunk_tmp = tempfile.NamedTemporaryFile(suffix=".wav", delete=False)
+        try:
+            sf.write(chunk_tmp.name, chunk_y, sr)
+            chunk_tmp.close()
+            log.info("Transcriere bucată %d/%d (offset %.0fs)", i + 1, n_chunks, time_offset)
+            chunk_res = _call_groq_transcribe(chunk_tmp.name, model)
+            for seg in chunk_res.get("segments", []):
+                seg["start"] = round(seg["start"] + time_offset, 2)
+                seg["end"] = round(seg["end"] + time_offset, 2)
+            all_segments.extend(chunk_res.get("segments", []))
+            full_text_parts.append(chunk_res.get("full_text", ""))
+            language = chunk_res.get("language", LANGUAGE)
+            chunks_ok += 1
+        except Exception as e:
+            log.error("Eroare bucată %d/%d: %s", i + 1, n_chunks, e)
+        finally:
+            try:
+                os.unlink(chunk_tmp.name)
+            except Exception:
+                pass
+
+    segs, removed = filter_hallucinations(all_segments)
+    log.info("Transcriere completă — %d bucăți, %d segmente, %.1fs total",
+             chunks_ok, len(segs), time.time() - t0)
+    return {
+        "segments": segs,
+        "full_text": " ".join(full_text_parts),
+        "language": language,
+        "duration": round(total_duration, 2),
+        "hallucinations_removed": removed,
+        "chunks_processed": n_chunks,
     }
 
 
@@ -271,12 +437,10 @@ def diarize_audio(audio_path: str, num_speakers: int, voice_fingerprint: list = 
                 label_map[i] = "Client" if num_speakers == 2 else f"Client {client_n}"
                 client_n += 1
     else:
-        if num_speakers == 2:
-            label_map = {0: "Vorbitor 1", 1: "Vorbitor 2"}
-        else:
-            label_map = {i: f"Vorbitor {i+1}" for i in range(num_speakers)}
+        label_map = {0: "Vorbitor 1", 1: "Vorbitor 2"} if num_speakers == 2 \
+            else {i: f"Vorbitor {i+1}" for i in range(num_speakers)}
 
-    log.info("Diarizare — %d segmente detectate pentru %d vorbitori", len(merged), num_speakers)
+    log.info("Diarizare — %d segmente pentru %d vorbitori", len(merged), num_speakers)
     return [(s[0], s[1], label_map.get(s[2], "Vorbitor")) for s in merged]
 
 
@@ -301,14 +465,12 @@ def post_process_transcript(segments: list) -> list:
         if match:
             corrected = json.loads(match.group(0))
             if isinstance(corrected, list) and len(corrected) == len(segments):
-                log.info("Post-procesare Claude — %d segmente corectate în %.1fs",
-                         len(segments), time.time() - t0)
+                log.info("Post-procesare — %d segmente în %.1fs", len(segments), time.time() - t0)
                 return [{**s, "text": corrected[i]} for i, s in enumerate(segments)]
-            else:
-                log.warning("Post-procesare — răspuns Claude are lungime diferită (%d vs %d)",
-                            len(corrected) if isinstance(corrected, list) else -1, len(segments))
+            log.warning("Post-procesare — lungime diferită (%d vs %d)",
+                        len(corrected) if isinstance(corrected, list) else -1, len(segments))
         else:
-            log.warning("Post-procesare — Claude nu a returnat JSON array valid. Răspuns brut: %.200s", raw)
+            log.warning("Post-procesare — JSON invalid de la Claude: %.200s", raw)
     except Exception as e:
         log.error("Post-procesare eroare: %s\n%s", e, traceback.format_exc())
     return segments
@@ -336,39 +498,35 @@ SUMMARY_PROMPT = """Esti asistentul unui avocat specializat in blockchain, cript
 
 Returneaza STRICT un obiect JSON valid (fara text inainte/dupa), cu urmatoarea structura:
 {
-  "titlu_sugerat": "Titlu scurt si descriptiv pentru fisier (ex: Consultatie initiala - dispute crypto wallet)",
-  "rezumat": "Rezumat concis in 2-4 propozitii al subiectului principal si concluziilor",
-  "puncte_cheie": [
-    "Punct important 1 discutat in convorbire",
-    "Punct important 2 discutat in convorbire"
-  ],
-  "intrebari_juridice": [
-    "Intrebare/aspect juridic ridicat de client"
-  ],
-  "actiuni": [
-    "Actiune concreta pe care trebuie sa o faca avocatul sau clientul"
-  ],
-  "termene_importante": [
-    "Termen/data importanta mentionata in convorbire"
-  ],
-  "informatii_client": [
-    "Detaliu factual despre client/situatie (nume companie, sume, blockchain folosit, etc.)"
-  ]
+  "titlu_sugerat": "Titlu scurt si descriptiv pentru fisier",
+  "rezumat": "Rezumat concis in 2-4 propozitii",
+  "puncte_cheie": ["Punct important 1", "Punct important 2"],
+  "intrebari_juridice": ["Intrebare juridica ridicata de client"],
+  "actiuni": ["Actiune concreta necesara"],
+  "termene_importante": ["Termen/data importanta mentionata"],
+  "informatii_client": ["Detaliu factual despre client/situatie"]
 }
 
 Reguli:
 - Foloseste limba romana
-- Daca o sectiune nu are continut relevant, returneaza un array gol []
-- Fii concis si specific, nu generic
+- Daca o sectiune nu are continut relevant, returneaza array gol []
+- Fii concis si specific
 - Foloseste exact aceste chei
 
 TRANSCRIPT:
 """
 
+MAX_SUMMARY_CHARS = 12000  # truncate very long transcripts to avoid Claude token limits
+
 
 def generate_summary(transcript_text: str) -> dict:
     if not ANTHROPIC_API_KEY:
         return {"error": "Adaugă ANTHROPIC_API_KEY în .env pentru rezumat AI"}
+
+    # Truncate if too long
+    if len(transcript_text) > MAX_SUMMARY_CHARS:
+        transcript_text = transcript_text[:MAX_SUMMARY_CHARS] + "\n[...transcript trunchiat...]"
+        log.warning("Transcript trunchiat la %d caractere pentru rezumat", MAX_SUMMARY_CHARS)
 
     raw = ""
     t0 = time.time()
@@ -401,7 +559,7 @@ def generate_summary(transcript_text: str) -> dict:
         return data
 
     except json.JSONDecodeError as e:
-        log.error("Rezumat — JSON invalid de la Claude: %s | Brut: %.300s", e, raw)
+        log.error("Rezumat — JSON invalid: %s | Brut: %.300s", e, raw)
         return {"error": f"AI nu a returnat JSON valid: {str(e)}", "raw": raw}
     except Exception as e:
         log.error("Rezumat eroare: %s\n%s", e, traceback.format_exc())
@@ -424,7 +582,6 @@ def build_docx(segments, summary_data, timestamp, duration):
     doc = Document()
     title = doc.add_heading("Transcript Convorbire Client", 0)
     title.alignment = WD_ALIGN_PARAGRAPH.CENTER
-
     info = doc.add_paragraph()
     info.add_run(f"Data: {timestamp}    |    Durata: {format_time(duration)}").bold = True
     info.alignment = WD_ALIGN_PARAGRAPH.CENTER
@@ -434,7 +591,6 @@ def build_docx(segments, summary_data, timestamp, duration):
         if summary_data.get("rezumat"):
             doc.add_heading("Rezumat", level=1)
             doc.add_paragraph(summary_data["rezumat"])
-
         for key, title_ro in [
             ("puncte_cheie", "Puncte cheie discutate"),
             ("intrebari_juridice", "Intrebari / Aspecte juridice"),
@@ -451,12 +607,10 @@ def build_docx(segments, summary_data, timestamp, duration):
 
     doc.add_heading("Transcript complet", level=1)
     speaker_colors = {"Avocat": RGBColor(0x00, 0x53, 0x9F), "Client": RGBColor(0x2E, 0x7D, 0x32)}
-
     for seg in segments:
         p = doc.add_paragraph()
         speaker = seg.get("speaker", "Vorbitor")
-        time_str = f"[{format_time(seg['start'])}]"
-        run_time = p.add_run(f"{time_str} ")
+        run_time = p.add_run(f"[{format_time(seg['start'])}] ")
         run_time.font.size = Pt(9)
         run_time.font.color.rgb = RGBColor(0x99, 0x99, 0x99)
         run_speaker = p.add_run(f"{speaker}: ")
@@ -472,7 +626,6 @@ def build_docx(segments, summary_data, timestamp, duration):
 
 def build_pdf(segments, summary_data, timestamp, duration):
     from fpdf import FPDF
-
     pdf = FPDF()
     pdf.add_page()
     pdf.set_auto_page_break(auto=True, margin=15)
@@ -493,7 +646,6 @@ def build_pdf(segments, summary_data, timestamp, duration):
             pdf.set_fill_color(245, 245, 245)
             pdf.multi_cell(0, 6, summary_data["rezumat"], fill=True)
             pdf.ln(3)
-
         for key, title_ro in [
             ("puncte_cheie", "Puncte cheie discutate"),
             ("intrebari_juridice", "Intrebari / Aspecte juridice"),
@@ -518,21 +670,18 @@ def build_pdf(segments, summary_data, timestamp, duration):
     speaker_colors = {"Avocat": (0, 83, 159), "Client": (46, 125, 50)}
     for seg in segments:
         speaker = seg.get("speaker", "Vorbitor")
-        time_str = f"[{format_time(seg['start'])}] "
-        text = seg.get("text", "")
         pdf.set_font("Helvetica", "", 8)
         pdf.set_text_color(150, 150, 150)
-        pdf.write(6, time_str)
+        pdf.write(6, f"[{format_time(seg['start'])}] ")
         color = speaker_colors.get(speaker, (50, 50, 50))
         pdf.set_text_color(*color)
         pdf.set_font("Helvetica", "B", 10)
         pdf.write(6, f"{speaker}: ")
         pdf.set_text_color(0, 0, 0)
         pdf.set_font("Helvetica", "", 10)
-        pdf.write(6, text)
+        pdf.write(6, seg.get("text", ""))
         pdf.ln(7)
 
-    # fpdf2 ≥ 2.7: output() returns bytes directly (dest="S" removed)
     return io.BytesIO(pdf.output())
 
 
@@ -589,7 +738,7 @@ def get_or_create_folder(service, name, parent_id=None):
 @app.route("/google/auth")
 def google_auth():
     if not GOOGLE_CLIENT_ID or not GOOGLE_CLIENT_SECRET:
-        return jsonify({"error": "Google OAuth nu este configurat. Adaugă GOOGLE_CLIENT_ID și GOOGLE_CLIENT_SECRET în .env"}), 400
+        return jsonify({"error": "Google OAuth nu este configurat"}), 400
     flow = build_flow()
     auth_url, state = flow.authorization_url(prompt="consent", access_type="offline", include_granted_scopes="true")
     session["google_oauth_state"] = state
@@ -598,17 +747,12 @@ def google_auth():
 
 @app.route("/google/callback")
 def google_callback():
-    # Userul a refuzat permisiunea OAuth
     if request.args.get("error"):
-        error = request.args.get("error")
-        log.warning("Google OAuth refuzat de utilizator: %s", error)
-        return redirect("/?oauth_error=" + error)
-
+        log.warning("Google OAuth refuzat: %s", request.args.get("error"))
+        return redirect("/?oauth_error=" + request.args.get("error"))
     state = session.get("google_oauth_state")
     if not state:
-        log.warning("Google OAuth callback fără state în sesiune")
         return redirect("/")
-
     try:
         flow = build_flow(state=state)
         flow.fetch_token(authorization_response=request.url)
@@ -630,14 +774,13 @@ def google_callback():
                 "name": user_info.get("name"),
                 "picture": user_info.get("picture"),
             }
-            log.info("Google OAuth reușit pentru: %s", user_info.get("email", "?"))
+            log.info("Google OAuth reușit: %s", user_info.get("email", "?"))
         except Exception as e:
             log.warning("Nu pot prelua info utilizator Google: %s", e)
             session["google_user"] = {}
     except Exception as e:
-        log.error("Google OAuth fetch_token eroare: %s\n%s", e, traceback.format_exc())
+        log.error("Google OAuth eroare: %s\n%s", e, traceback.format_exc())
         return redirect("/?oauth_error=token_error")
-
     return redirect("/")
 
 
@@ -661,10 +804,9 @@ def google_status():
 @app.route("/google/save", methods=["POST"])
 def google_save():
     from googleapiclient.http import MediaIoBaseUpload
-
     service = get_drive_service()
     if not service:
-        return jsonify({"error": "Nu ești conectat la Google. Conectează-te mai întâi."}), 401
+        return jsonify({"error": "Nu ești conectat la Google."}), 401
 
     data = request.get_json()
     segments = data.get("segments", [])
@@ -681,38 +823,28 @@ def google_save():
             target_folder = get_or_create_folder(service, client_folder, parent_id=root_folder_id)
 
         docx_buf = build_docx(segments, summary_data, timestamp, duration)
-
         suggested_title = summary_data.get("titlu_sugerat", "") if isinstance(summary_data, dict) else ""
         date_str = datetime.now().strftime("%Y-%m-%d")
-        if custom_title:
-            filename = f"{date_str} - {custom_title}"
-        elif suggested_title:
-            filename = f"{date_str} - {suggested_title}"
-        else:
-            filename = f"Transcript {timestamp}"
+        filename = f"{date_str} - {custom_title or suggested_title or f'Transcript {timestamp}'}"
 
         media = MediaIoBaseUpload(
             docx_buf,
             mimetype="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
             resumable=False,
         )
-        metadata = {
-            "name": filename,
-            "mimeType": "application/vnd.google-apps.document",
-            "parents": [target_folder],
-        }
-        file = service.files().create(body=metadata, media_body=media, fields="id, webViewLink, name").execute()
+        file = service.files().create(
+            body={"name": filename, "mimeType": "application/vnd.google-apps.document", "parents": [target_folder]},
+            media_body=media,
+            fields="id, webViewLink, name",
+        ).execute()
         log.info("Salvat în Google Drive: %s", file.get("name"))
         return jsonify({
-            "ok": True,
-            "id": file.get("id"),
-            "name": file.get("name"),
+            "ok": True, "id": file.get("id"), "name": file.get("name"),
             "url": file.get("webViewLink"),
             "folder_url": f"https://drive.google.com/drive/folders/{target_folder}",
         })
-
     except Exception as e:
-        log.error("Google Drive save eroare: %s\n%s", e, traceback.format_exc())
+        log.error("Google Drive save: %s\n%s", e, traceback.format_exc())
         return jsonify({"error": str(e)}), 500
 
 
@@ -725,13 +857,11 @@ def google_folders():
         root_id = get_or_create_folder(service, GOOGLE_DRIVE_FOLDER_NAME)
         results = service.files().list(
             q=f"'{root_id}' in parents and mimeType='application/vnd.google-apps.folder' and trashed=false",
-            fields="files(id, name)",
-            orderBy="name",
+            fields="files(id, name)", orderBy="name",
         ).execute()
-        folders = [f["name"] for f in results.get("files", [])]
-        return jsonify({"folders": folders})
+        return jsonify({"folders": [f["name"] for f in results.get("files", [])]})
     except Exception as e:
-        log.warning("Nu pot lista folderele Google Drive: %s", e)
+        log.warning("Google folders: %s", e)
         return jsonify({"folders": []})
 
 
@@ -742,6 +872,17 @@ def index():
     return render_template("index.html")
 
 
+def _save_transcript(result: dict):
+    try:
+        ts = result.get("timestamp", datetime.now().strftime("%Y-%m-%d_%H-%M"))
+        sid = result.get("session_id", str(uuid.uuid4())[:8])
+        path = TRANSCRIPTS_DIR / f"{ts}_{sid}.json"
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(result, f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        log.warning("Nu pot salva transcriptul local: %s", e)
+
+
 @app.route("/transcribe", methods=["POST"])
 def transcribe():
     if "audio" not in request.files:
@@ -749,20 +890,22 @@ def transcribe():
 
     audio_file = request.files["audio"]
     num_speakers = int(request.form.get("num_speakers", 2))
+    model = request.form.get("model", GROQ_MODEL)
 
     suffix = ".webm"
     original_name = audio_file.filename or ""
     if "." in original_name:
         suffix = "." + original_name.rsplit(".", 1)[-1].lower()
 
-    log.info("Cerere transcriere — fișier: %s, vorbitori: %d", original_name or "recording", num_speakers)
+    log.info("Cerere transcriere — fișier: %s, vorbitori: %d, model: %s",
+             original_name or "recording", num_speakers, model)
 
     with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as tmp:
         audio_file.save(tmp.name)
         tmp_path = tmp.name
 
-    voice_fp_raw = request.form.get("voice_fingerprint", "")
     voice_fingerprint = None
+    voice_fp_raw = request.form.get("voice_fingerprint", "")
     if voice_fp_raw:
         try:
             voice_fingerprint = json.loads(voice_fp_raw)
@@ -770,7 +913,7 @@ def transcribe():
             log.warning("Voice fingerprint JSON invalid: %s", e)
 
     try:
-        result = transcribe_audio(tmp_path)
+        result = transcribe_audio(tmp_path, model=model)
 
         diarization = diarize_audio(tmp_path, num_speakers, voice_fingerprint)
         if diarization:
@@ -780,22 +923,56 @@ def transcribe():
             result["segments"] = _fallback_speakers(result["segments"], num_speakers, voice_fingerprint is not None)
             result["diarization_used"] = False
 
-        session_id = str(uuid.uuid4())[:8]
-        timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M")
-        result["session_id"] = session_id
-        result["timestamp"] = timestamp
-
-        try:
-            transcript_path = TRANSCRIPTS_DIR / f"{timestamp}_{session_id}.json"
-            with open(transcript_path, "w", encoding="utf-8") as f:
-                json.dump(result, f, ensure_ascii=False, indent=2)
-        except Exception as e:
-            log.warning("Nu pot salva transcriptul local: %s", e)
-
+        result["session_id"] = str(uuid.uuid4())[:8]
+        result["timestamp"] = datetime.now().strftime("%Y-%m-%d_%H-%M")
+        _save_transcript(result)
         return jsonify(result)
 
     except Exception as e:
-        log.error("Eroare la transcriere: %s\n%s", e, traceback.format_exc())
+        log.error("Eroare transcriere: %s\n%s", e, traceback.format_exc())
+        return jsonify({"error": str(e)}), 500
+    finally:
+        try:
+            os.unlink(tmp_path)
+        except Exception:
+            pass
+
+
+@app.route("/transcribe-chunk", methods=["POST"])
+def transcribe_chunk():
+    """Endpoint pentru transcrierea live — primește un chunk audio cu offset de timp."""
+    if "audio" not in request.files:
+        return jsonify({"error": "Niciun fișier audio"}), 400
+
+    audio_file = request.files["audio"]
+    time_offset = float(request.form.get("offset", 0))
+    model = request.form.get("model", GROQ_MODEL)
+
+    original_name = audio_file.filename or "chunk.webm"
+    suffix = "." + original_name.rsplit(".", 1)[-1].lower() if "." in original_name else ".webm"
+
+    with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as tmp:
+        audio_file.save(tmp.name)
+        tmp_path = tmp.name
+
+    try:
+        result = transcribe_audio(tmp_path, model=model)
+        segments = result.get("segments", [])
+
+        # Aplică offset-ul de timp
+        for seg in segments:
+            seg["start"] = round(seg["start"] + time_offset, 2)
+            seg["end"] = round(seg["end"] + time_offset, 2)
+
+        log.info("Chunk transcris (offset %.0fs) — %d segmente", time_offset, len(segments))
+        return jsonify({
+            "segments": segments,
+            "duration": result.get("duration", 0),
+            "language": result.get("language", LANGUAGE),
+            "hallucinations_removed": result.get("hallucinations_removed", 0),
+        })
+    except Exception as e:
+        log.error("Chunk transcription eroare: %s\n%s", e, traceback.format_exc())
         return jsonify({"error": str(e)}), 500
     finally:
         try:
@@ -824,7 +1001,6 @@ def _fallback_speakers(segments: list, num_speakers: int, has_profile: bool) -> 
 def voice_register():
     if "audio" not in request.files:
         return jsonify({"error": "Niciun fișier audio"}), 400
-
     audio_file = request.files["audio"]
     original_name = audio_file.filename or "sample.webm"
     suffix = "." + original_name.rsplit(".", 1)[-1].lower() if "." in original_name else ".webm"
@@ -838,7 +1014,7 @@ def voice_register():
         fingerprint = extract_voice_fingerprint(tmp_path)
         return jsonify({"fingerprint": fingerprint, "ok": True})
     except Exception as e:
-        log.error("Voice register eroare: %s\n%s", e, traceback.format_exc())
+        log.error("Voice register: %s\n%s", e, traceback.format_exc())
         return jsonify({"error": str(e)}), 500
     finally:
         try:
@@ -853,9 +1029,10 @@ def summarize():
     segments = data.get("segments", [])
     if not segments:
         return jsonify({"error": "Transcript gol"}), 400
-    transcript_text = "\n".join(f"{s.get('speaker', 'Vorbitor')}: {s.get('text', '')}" for s in segments)
-    summary = generate_summary(transcript_text)
-    return jsonify(summary)
+    transcript_text = "\n".join(
+        f"{s.get('speaker', 'Vorbitor')}: {s.get('text', '')}" for s in segments
+    )
+    return jsonify(generate_summary(transcript_text))
 
 
 @app.route("/postprocess", methods=["POST"])
@@ -865,23 +1042,21 @@ def postprocess():
     if not segments:
         return jsonify({"error": "Transcript gol"}), 400
     if not ANTHROPIC_API_KEY:
-        return jsonify({"error": "Adaugă ANTHROPIC_API_KEY în .env pentru corecție AI"}), 400
-    corrected = post_process_transcript(segments)
-    return jsonify({"segments": corrected})
+        return jsonify({"error": "Adaugă ANTHROPIC_API_KEY în .env"}), 400
+    return jsonify({"segments": post_process_transcript(segments)})
 
 
 @app.route("/export/word", methods=["POST"])
 def export_word():
     data = request.get_json()
-    segments = data.get("segments", [])
-    summary_data = data.get("summary", {}) or {}
-    timestamp = data.get("timestamp", datetime.now().strftime("%Y-%m-%d %H:%M"))
-    duration = data.get("duration", 0)
-    buf = build_docx(segments, summary_data, timestamp, duration)
+    buf = build_docx(
+        data.get("segments", []), data.get("summary", {}) or {},
+        data.get("timestamp", datetime.now().strftime("%Y-%m-%d %H:%M")),
+        data.get("duration", 0),
+    )
     return send_file(
-        buf,
-        as_attachment=True,
-        download_name=f"transcript_{timestamp.replace(':', '-')}.docx",
+        buf, as_attachment=True,
+        download_name=f"transcript_{data.get('timestamp', 'export').replace(':', '-')}.docx",
         mimetype="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
     )
 
@@ -889,20 +1064,19 @@ def export_word():
 @app.route("/export/pdf", methods=["POST"])
 def export_pdf():
     data = request.get_json()
-    segments = data.get("segments", [])
-    summary_data = data.get("summary", {}) or {}
-    timestamp = data.get("timestamp", datetime.now().strftime("%Y-%m-%d %H:%M"))
-    duration = data.get("duration", 0)
     try:
-        buf = build_pdf(segments, summary_data, timestamp, duration)
+        buf = build_pdf(
+            data.get("segments", []), data.get("summary", {}) or {},
+            data.get("timestamp", datetime.now().strftime("%Y-%m-%d %H:%M")),
+            data.get("duration", 0),
+        )
         return send_file(
-            buf,
-            as_attachment=True,
-            download_name=f"transcript_{timestamp.replace(':', '-')}.pdf",
+            buf, as_attachment=True,
+            download_name=f"transcript_{data.get('timestamp', 'export').replace(':', '-')}.pdf",
             mimetype="application/pdf",
         )
     except Exception as e:
-        log.error("Export PDF eroare: %s\n%s", e, traceback.format_exc())
+        log.error("Export PDF: %s\n%s", e, traceback.format_exc())
         return jsonify({"error": f"Export PDF eșuat: {str(e)}"}), 500
 
 
@@ -916,11 +1090,8 @@ def check_api():
     })
 
 
-# ===== LOGS ENDPOINT =====
-
 @app.route("/logs")
 def view_logs():
-    """Returnează ultimele N linii din log. Accesibil doar din rețeaua internă sau cu cheie."""
     log_key = os.getenv("LOG_ACCESS_KEY", "")
     if log_key and request.args.get("key") != log_key:
         return jsonify({"error": "Acces interzis. Adaugă ?key=<LOG_ACCESS_KEY>"}), 403
@@ -929,7 +1100,7 @@ def view_logs():
     log_file = LOGS_DIR / "app.log" if LOGS_DIR else None
 
     if not log_file or not log_file.exists():
-        return jsonify({"error": "Fișierul de log nu există (posibil pe sistem fără acces la disc)", "lines": []})
+        return jsonify({"error": "Log file indisponibil", "lines": []})
 
     try:
         with open(log_file, "r", encoding="utf-8") as f:
@@ -951,11 +1122,10 @@ if __name__ == "__main__":
     PORT = int(os.getenv("PORT", 8080))
     log.info("=" * 50)
     log.info("  Transcriptor AI - BlockchainAttorney")
-    log.info("=" * 50)
-    log.info("  Transcriere (Groq): %s", "DA" if GROQ_API_KEY else "NU")
-    log.info("  Rezumat AI (Claude): %s", "DA" if ANTHROPIC_API_KEY else "NU")
-    log.info("  Google Drive: %s", "DA" if (GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET) else "NU")
-    log.info("  Limba: %s", LANGUAGE)
-    log.info("  Deschide: http://localhost:%d", PORT)
+    log.info("  Groq: %s | Claude: %s | Google: %s",
+             "DA" if GROQ_API_KEY else "NU",
+             "DA" if ANTHROPIC_API_KEY else "NU",
+             "DA" if (GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET) else "NU")
+    log.info("  http://localhost:%d", PORT)
     log.info("=" * 50)
     app.run(debug=False, host="0.0.0.0", port=PORT)
