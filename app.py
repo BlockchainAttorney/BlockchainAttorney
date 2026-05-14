@@ -2,13 +2,16 @@ import os
 import io
 import uuid
 import json
+import logging
 import tempfile
 import traceback
 import re
+import time
+from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from datetime import datetime
 
-from flask import Flask, request, jsonify, render_template, send_file, redirect, url_for, session
+from flask import Flask, request, jsonify, render_template, send_file, redirect, url_for, session, g
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -20,6 +23,44 @@ app.secret_key = os.getenv("FLASK_SECRET_KEY", "schimba-aceasta-cheie-in-product
 # Allow OAuth over HTTP for local development
 if os.getenv("FLASK_ENV", "development") == "development":
     os.environ["OAUTHLIB_INSECURE_TRANSPORT"] = "1"
+
+# ===== LOGGING =====
+
+LOGS_DIR = Path("logs")
+try:
+    LOGS_DIR.mkdir(exist_ok=True)
+except Exception:
+    LOGS_DIR = None
+
+def _setup_logging():
+    fmt = logging.Formatter(
+        "%(asctime)s [%(levelname)s] %(name)s — %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S",
+    )
+    root = logging.getLogger()
+    root.setLevel(logging.INFO)
+
+    # Console handler (visible in Render logs)
+    ch = logging.StreamHandler()
+    ch.setFormatter(fmt)
+    root.addHandler(ch)
+
+    # Rotating file handler (10 MB × 5 fișiere = 50 MB max)
+    if LOGS_DIR:
+        try:
+            fh = RotatingFileHandler(
+                LOGS_DIR / "app.log",
+                maxBytes=10 * 1024 * 1024,
+                backupCount=5,
+                encoding="utf-8",
+            )
+            fh.setFormatter(fmt)
+            root.addHandler(fh)
+        except Exception as e:
+            root.warning(f"Nu pot crea log file: {e}")
+
+_setup_logging()
+log = logging.getLogger("transcriptor")
 
 TRANSCRIPTS_DIR = Path("transcripts")
 try:
@@ -43,9 +84,35 @@ GOOGLE_SCOPES = [
 ]
 
 
+# ===== REQUEST LOGGING MIDDLEWARE =====
+
+@app.before_request
+def _before():
+    g.start_time = time.time()
+    g.req_id = str(uuid.uuid4())[:8]
+
+@app.after_request
+def _after(response):
+    duration_ms = int((time.time() - g.start_time) * 1000)
+    level = logging.WARNING if response.status_code >= 400 else logging.INFO
+    log.log(level, "[%s] %s %s → %d (%dms)",
+            g.req_id, request.method, request.path, response.status_code, duration_ms)
+    return response
+
+@app.errorhandler(Exception)
+def _unhandled(e):
+    log.error("[%s] Eroare neașteptată: %s\n%s",
+              getattr(g, "req_id", "?"), str(e), traceback.format_exc())
+    return jsonify({"error": f"Eroare server: {str(e)}"}), 500
+
+@app.errorhandler(413)
+def _too_large(e):
+    log.warning("Upload prea mare (>100MB)")
+    return jsonify({"error": "Fișierul depășește 100 MB. Comprimați înregistrarea și încercați din nou."}), 413
+
+
 # ===== TRANSCRIERE =====
 
-# Vocabular juridic general — ghideaza Whisper spre termeni specifici domeniului
 WHISPER_LEGAL_PROMPT = (
     "Transcript convorbire juridică. "
     "Termeni: dosar, tribunal, judecătorie, instanță, complet de judecată, reclamant, pârât, "
@@ -60,7 +127,6 @@ WHISPER_LEGAL_PROMPT = (
     "excepție, întâmpinare, cerere reconvențională."
 )
 
-# Post-procesare Claude — corector strict, fara adaugiri sau interpretari
 POSTPROCESS_PROMPT = """Ești un corector tehnic de transcrieri audio în limba română. \
 Primești segmente dintr-o transcriere automată și corectezi EXCLUSIV erorile evidente de recunoaștere vocală.
 
@@ -92,13 +158,16 @@ Input (JSON array de texte):
 
 def get_groq_client():
     if not GROQ_API_KEY:
-        raise RuntimeError("GROQ_API_KEY lipseste. Adauga cheia in .env (https://console.groq.com)")
+        raise RuntimeError("GROQ_API_KEY lipsește. Adaugă cheia în .env (https://console.groq.com)")
     from groq import Groq
     return Groq(api_key=GROQ_API_KEY)
 
 
 def transcribe_audio(audio_path: str) -> dict:
+    t0 = time.time()
     client = get_groq_client()
+    file_size = os.path.getsize(audio_path)
+    log.info("Transcriere start — fișier: %.1f MB, model: %s", file_size / 1_048_576, GROQ_MODEL)
 
     with open(audio_path, "rb") as audio_file:
         transcription = client.audio.transcriptions.create(
@@ -114,13 +183,9 @@ def transcribe_audio(audio_path: str) -> dict:
     result_segments = []
     for seg in segments_raw:
         if isinstance(seg, dict):
-            start = seg.get("start", 0)
-            end = seg.get("end", 0)
-            text = seg.get("text", "")
+            start, end, text = seg.get("start", 0), seg.get("end", 0), seg.get("text", "")
         else:
-            start = getattr(seg, "start", 0)
-            end = getattr(seg, "end", 0)
-            text = getattr(seg, "text", "")
+            start, end, text = getattr(seg, "start", 0), getattr(seg, "end", 0), getattr(seg, "text", "")
         result_segments.append({
             "start": round(float(start), 2),
             "end": round(float(end), 2),
@@ -132,6 +197,10 @@ def transcribe_audio(audio_path: str) -> dict:
     duration = getattr(transcription, "duration", 0) or (result_segments[-1]["end"] if result_segments else 0)
     language = getattr(transcription, "language", LANGUAGE) or LANGUAGE
 
+    elapsed = time.time() - t0
+    log.info("Transcriere finalizată — %d segmente, %.1f sec audio, în %.1fs",
+             len(result_segments), float(duration), elapsed)
+
     return {
         "segments": result_segments,
         "full_text": full_text,
@@ -141,20 +210,15 @@ def transcribe_audio(audio_path: str) -> dict:
 
 
 def extract_voice_fingerprint(audio_path: str) -> list:
-    """Extract MFCC-based voice fingerprint (20 coefficients mean vector)."""
     import librosa
     import numpy as np
+    log.info("Extragere amprentă vocală: %s", os.path.basename(audio_path))
     y, sr = librosa.load(audio_path, sr=16000, mono=True, duration=30)
     mfcc = librosa.feature.mfcc(y=y, sr=sr, n_mfcc=20)
     return np.mean(mfcc, axis=1).tolist()
 
 
 def diarize_audio(audio_path: str, num_speakers: int, voice_fingerprint: list = None) -> list:
-    """
-    Speaker diarization via MFCC + KMeans clustering.
-    Returns list of (start_sec, end_sec, speaker_label) tuples.
-    If voice_fingerprint provided, auto-labels lawyer's voice as 'Avocat'.
-    """
     import librosa
     import numpy as np
     from sklearn.cluster import KMeans
@@ -162,20 +226,19 @@ def diarize_audio(audio_path: str, num_speakers: int, voice_fingerprint: list = 
     try:
         y, sr = librosa.load(audio_path, sr=16000, mono=True)
     except Exception as e:
-        print(f"[Diarize] Nu pot incarca audio: {e}")
+        log.error("Diarizare — nu pot încărca audio: %s", e)
         return []
 
-    hop_length = int(sr * 0.4)  # ~400ms frames
-    mfcc = librosa.feature.mfcc(y=y, sr=sr, n_mfcc=20, hop_length=hop_length)
-    mfcc = mfcc.T  # [n_frames, 20]
+    hop_length = int(sr * 0.4)
+    mfcc = librosa.feature.mfcc(y=y, sr=sr, n_mfcc=20, hop_length=hop_length).T
 
     if len(mfcc) < num_speakers * 4:
+        log.warning("Diarizare — prea puține frame-uri (%d) pentru %d vorbitori", len(mfcc), num_speakers)
         return []
 
     kmeans = KMeans(n_clusters=num_speakers, random_state=42, n_init=10)
     labels = kmeans.fit_predict(mfcc)
 
-    # Group consecutive frames into segments
     frame_dur = hop_length / sr
     raw_segs = []
     current = int(labels[0])
@@ -187,7 +250,6 @@ def diarize_audio(audio_path: str, num_speakers: int, voice_fingerprint: list = 
             start_idx = i
     raw_segs.append([start_idx * frame_dur, len(labels) * frame_dur, current])
 
-    # Merge very short segments (< 0.8s) with neighbours
     merged = []
     for seg in raw_segs:
         if merged and (seg[1] - seg[0]) < 0.8:
@@ -197,7 +259,6 @@ def diarize_audio(audio_path: str, num_speakers: int, voice_fingerprint: list = 
                 continue
         merged.append(seg)
 
-    # Build speaker label map
     if voice_fingerprint and len(voice_fingerprint) == 20:
         fp = np.array(voice_fingerprint)
         centroids = kmeans.cluster_centers_
@@ -215,13 +276,14 @@ def diarize_audio(audio_path: str, num_speakers: int, voice_fingerprint: list = 
         else:
             label_map = {i: f"Vorbitor {i+1}" for i in range(num_speakers)}
 
+    log.info("Diarizare — %d segmente detectate pentru %d vorbitori", len(merged), num_speakers)
     return [(s[0], s[1], label_map.get(s[2], "Vorbitor")) for s in merged]
 
 
 def post_process_transcript(segments: list) -> list:
-    """Use Claude to fix transcription errors — strictly no additions or rewriting."""
     if not ANTHROPIC_API_KEY or not segments:
         return segments
+    t0 = time.time()
     try:
         import anthropic
         texts = [s.get("text", "") for s in segments]
@@ -235,20 +297,24 @@ def post_process_transcript(segments: list) -> list:
             }],
         )
         raw = message.content[0].text.strip()
-
-        # Extract JSON array from response
         match = re.search(r"\[.*\]", raw, re.DOTALL)
         if match:
             corrected = json.loads(match.group(0))
             if isinstance(corrected, list) and len(corrected) == len(segments):
+                log.info("Post-procesare Claude — %d segmente corectate în %.1fs",
+                         len(segments), time.time() - t0)
                 return [{**s, "text": corrected[i]} for i, s in enumerate(segments)]
+            else:
+                log.warning("Post-procesare — răspuns Claude are lungime diferită (%d vs %d)",
+                            len(corrected) if isinstance(corrected, list) else -1, len(segments))
+        else:
+            log.warning("Post-procesare — Claude nu a returnat JSON array valid. Răspuns brut: %.200s", raw)
     except Exception as e:
-        print(f"[PostProcess] Eroare: {e}")
-    return segments  # Return original on any failure
+        log.error("Post-procesare eroare: %s\n%s", e, traceback.format_exc())
+    return segments
 
 
 def align_diarization(groq_segments: list, diarization: list) -> list:
-    """Map speaker labels from diarization onto Groq transcript segments by overlap."""
     if not diarization:
         return groq_segments
     result = []
@@ -302,9 +368,10 @@ TRANSCRIPT:
 
 def generate_summary(transcript_text: str) -> dict:
     if not ANTHROPIC_API_KEY:
-        return {"error": "Adauga ANTHROPIC_API_KEY in .env pentru rezumat AI"}
+        return {"error": "Adaugă ANTHROPIC_API_KEY în .env pentru rezumat AI"}
 
     raw = ""
+    t0 = time.time()
     try:
         import anthropic
         client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
@@ -325,15 +392,19 @@ def generate_summary(transcript_text: str) -> dict:
                 raw = raw[start:end + 1]
 
         data = json.loads(raw)
-        for key in ["titlu_sugerat", "rezumat", "puncte_cheie", "intrebari_juridice", "actiuni", "termene_importante", "informatii_client"]:
+        for key in ["titlu_sugerat", "rezumat", "puncte_cheie", "intrebari_juridice",
+                    "actiuni", "termene_importante", "informatii_client"]:
             if key not in data:
                 data[key] = [] if key not in ["rezumat", "titlu_sugerat"] else ""
+
+        log.info("Rezumat generat în %.1fs", time.time() - t0)
         return data
 
     except json.JSONDecodeError as e:
+        log.error("Rezumat — JSON invalid de la Claude: %s | Brut: %.300s", e, raw)
         return {"error": f"AI nu a returnat JSON valid: {str(e)}", "raw": raw}
     except Exception as e:
-        print(f"[Summary] Eroare: {e}")
+        log.error("Rezumat eroare: %s\n%s", e, traceback.format_exc())
         return {"error": str(e)}
 
 
@@ -401,22 +472,23 @@ def build_docx(segments, summary_data, timestamp, duration):
 
 def build_pdf(segments, summary_data, timestamp, duration):
     from fpdf import FPDF
+
     pdf = FPDF()
     pdf.add_page()
     pdf.set_auto_page_break(auto=True, margin=15)
 
     pdf.set_font("Helvetica", "B", 18)
-    pdf.cell(0, 12, "Transcript Convorbire Client", ln=True, align="C")
+    pdf.cell(0, 12, "Transcript Convorbire Client", align="C", new_x="LMARGIN", new_y="NEXT")
     pdf.set_font("Helvetica", "", 10)
     pdf.set_text_color(100, 100, 100)
-    pdf.cell(0, 8, f"Data: {timestamp}  |  Durata: {format_time(duration)}", ln=True, align="C")
+    pdf.cell(0, 8, f"Data: {timestamp}  |  Durata: {format_time(duration)}", align="C", new_x="LMARGIN", new_y="NEXT")
     pdf.set_text_color(0, 0, 0)
     pdf.ln(5)
 
     if isinstance(summary_data, dict) and not summary_data.get("error"):
         if summary_data.get("rezumat"):
             pdf.set_font("Helvetica", "B", 13)
-            pdf.cell(0, 8, "Rezumat", ln=True)
+            pdf.cell(0, 8, "Rezumat", new_x="LMARGIN", new_y="NEXT")
             pdf.set_font("Helvetica", "", 10)
             pdf.set_fill_color(245, 245, 245)
             pdf.multi_cell(0, 6, summary_data["rezumat"], fill=True)
@@ -432,7 +504,7 @@ def build_pdf(segments, summary_data, timestamp, duration):
             items = summary_data.get(key, [])
             if items:
                 pdf.set_font("Helvetica", "B", 11)
-                pdf.cell(0, 7, title_ro, ln=True)
+                pdf.cell(0, 7, title_ro, new_x="LMARGIN", new_y="NEXT")
                 pdf.set_font("Helvetica", "", 10)
                 for item in items:
                     pdf.multi_cell(0, 5, f"  - {item}")
@@ -440,7 +512,7 @@ def build_pdf(segments, summary_data, timestamp, duration):
 
     pdf.ln(3)
     pdf.set_font("Helvetica", "B", 13)
-    pdf.cell(0, 8, "Transcript complet", ln=True)
+    pdf.cell(0, 8, "Transcript complet", new_x="LMARGIN", new_y="NEXT")
     pdf.ln(2)
 
     speaker_colors = {"Avocat": (0, 83, 159), "Client": (46, 125, 50)}
@@ -460,8 +532,8 @@ def build_pdf(segments, summary_data, timestamp, duration):
         pdf.write(6, text)
         pdf.ln(7)
 
-    out = bytes(pdf.output(dest="S"))
-    return io.BytesIO(out)
+    # fpdf2 ≥ 2.7: output() returns bytes directly (dest="S" removed)
+    return io.BytesIO(pdf.output())
 
 
 # ===== GOOGLE DRIVE =====
@@ -517,7 +589,7 @@ def get_or_create_folder(service, name, parent_id=None):
 @app.route("/google/auth")
 def google_auth():
     if not GOOGLE_CLIENT_ID or not GOOGLE_CLIENT_SECRET:
-        return jsonify({"error": "Google OAuth nu este configurat. Adauga GOOGLE_CLIENT_ID si GOOGLE_CLIENT_SECRET in .env"}), 400
+        return jsonify({"error": "Google OAuth nu este configurat. Adaugă GOOGLE_CLIENT_ID și GOOGLE_CLIENT_SECRET în .env"}), 400
     flow = build_flow()
     auth_url, state = flow.authorization_url(prompt="consent", access_type="offline", include_granted_scopes="true")
     session["google_oauth_state"] = state
@@ -526,32 +598,46 @@ def google_auth():
 
 @app.route("/google/callback")
 def google_callback():
+    # Userul a refuzat permisiunea OAuth
+    if request.args.get("error"):
+        error = request.args.get("error")
+        log.warning("Google OAuth refuzat de utilizator: %s", error)
+        return redirect("/?oauth_error=" + error)
+
     state = session.get("google_oauth_state")
     if not state:
+        log.warning("Google OAuth callback fără state în sesiune")
         return redirect("/")
-    flow = build_flow(state=state)
-    flow.fetch_token(authorization_response=request.url)
-    creds = flow.credentials
-    session["google_creds"] = {
-        "token": creds.token,
-        "refresh_token": creds.refresh_token,
-        "token_uri": creds.token_uri,
-        "client_id": creds.client_id,
-        "client_secret": creds.client_secret,
-        "scopes": creds.scopes,
-    }
-    # Get user info
+
     try:
-        from googleapiclient.discovery import build
-        oauth2 = build("oauth2", "v2", credentials=creds, cache_discovery=False)
-        user_info = oauth2.userinfo().get().execute()
-        session["google_user"] = {
-            "email": user_info.get("email"),
-            "name": user_info.get("name"),
-            "picture": user_info.get("picture"),
+        flow = build_flow(state=state)
+        flow.fetch_token(authorization_response=request.url)
+        creds = flow.credentials
+        session["google_creds"] = {
+            "token": creds.token,
+            "refresh_token": creds.refresh_token,
+            "token_uri": creds.token_uri,
+            "client_id": creds.client_id,
+            "client_secret": creds.client_secret,
+            "scopes": list(creds.scopes) if creds.scopes else [],
         }
-    except Exception:
-        session["google_user"] = {}
+        try:
+            from googleapiclient.discovery import build as g_build
+            oauth2 = g_build("oauth2", "v2", credentials=creds, cache_discovery=False)
+            user_info = oauth2.userinfo().get().execute()
+            session["google_user"] = {
+                "email": user_info.get("email"),
+                "name": user_info.get("name"),
+                "picture": user_info.get("picture"),
+            }
+            log.info("Google OAuth reușit pentru: %s", user_info.get("email", "?"))
+        except Exception as e:
+            log.warning("Nu pot prelua info utilizator Google: %s", e)
+            session["google_user"] = {}
+    except Exception as e:
+        log.error("Google OAuth fetch_token eroare: %s\n%s", e, traceback.format_exc())
+        return redirect("/?oauth_error=token_error")
+
     return redirect("/")
 
 
@@ -578,7 +664,7 @@ def google_save():
 
     service = get_drive_service()
     if not service:
-        return jsonify({"error": "Nu esti conectat la Google. Conecteaza-te mai intai."}), 401
+        return jsonify({"error": "Nu ești conectat la Google. Conectează-te mai întâi."}), 401
 
     data = request.get_json()
     segments = data.get("segments", [])
@@ -589,18 +675,13 @@ def google_save():
     custom_title = (data.get("title") or "").strip()
 
     try:
-        # Get/create root folder
         root_folder_id = get_or_create_folder(service, GOOGLE_DRIVE_FOLDER_NAME)
-
-        # Get/create client subfolder if specified
         target_folder = root_folder_id
         if client_folder:
             target_folder = get_or_create_folder(service, client_folder, parent_id=root_folder_id)
 
-        # Build docx
         docx_buf = build_docx(segments, summary_data, timestamp, duration)
 
-        # Determine filename
         suggested_title = summary_data.get("titlu_sugerat", "") if isinstance(summary_data, dict) else ""
         date_str = datetime.now().strftime("%Y-%m-%d")
         if custom_title:
@@ -617,10 +698,11 @@ def google_save():
         )
         metadata = {
             "name": filename,
-            "mimeType": "application/vnd.google-apps.document",  # Convert to Google Doc
+            "mimeType": "application/vnd.google-apps.document",
             "parents": [target_folder],
         }
         file = service.files().create(body=metadata, media_body=media, fields="id, webViewLink, name").execute()
+        log.info("Salvat în Google Drive: %s", file.get("name"))
         return jsonify({
             "ok": True,
             "id": file.get("id"),
@@ -630,13 +712,12 @@ def google_save():
         })
 
     except Exception as e:
-        traceback.print_exc()
+        log.error("Google Drive save eroare: %s\n%s", e, traceback.format_exc())
         return jsonify({"error": str(e)}), 500
 
 
 @app.route("/google/folders")
 def google_folders():
-    """List existing client subfolders for auto-complete."""
     service = get_drive_service()
     if not service:
         return jsonify({"folders": []})
@@ -649,7 +730,8 @@ def google_folders():
         ).execute()
         folders = [f["name"] for f in results.get("files", [])]
         return jsonify({"folders": folders})
-    except Exception:
+    except Exception as e:
+        log.warning("Nu pot lista folderele Google Drive: %s", e)
         return jsonify({"folders": []})
 
 
@@ -663,7 +745,7 @@ def index():
 @app.route("/transcribe", methods=["POST"])
 def transcribe():
     if "audio" not in request.files:
-        return jsonify({"error": "Niciun fisier audio trimis"}), 400
+        return jsonify({"error": "Niciun fișier audio trimis"}), 400
 
     audio_file = request.files["audio"]
     num_speakers = int(request.form.get("num_speakers", 2))
@@ -671,31 +753,30 @@ def transcribe():
     suffix = ".webm"
     original_name = audio_file.filename or ""
     if "." in original_name:
-        suffix = "." + original_name.rsplit(".", 1)[-1]
+        suffix = "." + original_name.rsplit(".", 1)[-1].lower()
+
+    log.info("Cerere transcriere — fișier: %s, vorbitori: %d", original_name or "recording", num_speakers)
 
     with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as tmp:
         audio_file.save(tmp.name)
         tmp_path = tmp.name
 
-    # Optional voice fingerprint for lawyer auto-detection
     voice_fp_raw = request.form.get("voice_fingerprint", "")
     voice_fingerprint = None
     if voice_fp_raw:
         try:
             voice_fingerprint = json.loads(voice_fp_raw)
-        except Exception:
-            pass
+        except Exception as e:
+            log.warning("Voice fingerprint JSON invalid: %s", e)
 
     try:
         result = transcribe_audio(tmp_path)
 
-        # Speaker diarization (voice-based)
         diarization = diarize_audio(tmp_path, num_speakers, voice_fingerprint)
         if diarization:
             result["segments"] = align_diarization(result["segments"], diarization)
             result["diarization_used"] = True
         else:
-            # Fallback: simple pause-based if diarization failed
             result["segments"] = _fallback_speakers(result["segments"], num_speakers, voice_fingerprint is not None)
             result["diarization_used"] = False
 
@@ -708,13 +789,13 @@ def transcribe():
             transcript_path = TRANSCRIPTS_DIR / f"{timestamp}_{session_id}.json"
             with open(transcript_path, "w", encoding="utf-8") as f:
                 json.dump(result, f, ensure_ascii=False, indent=2)
-        except Exception:
-            pass
+        except Exception as e:
+            log.warning("Nu pot salva transcriptul local: %s", e)
 
         return jsonify(result)
 
     except Exception as e:
-        traceback.print_exc()
+        log.error("Eroare la transcriere: %s\n%s", e, traceback.format_exc())
         return jsonify({"error": str(e)}), 500
     finally:
         try:
@@ -724,7 +805,6 @@ def transcribe():
 
 
 def _fallback_speakers(segments: list, num_speakers: int, has_profile: bool) -> list:
-    """Simple pause-based fallback when diarization fails."""
     if not segments:
         return segments
     if has_profile:
@@ -742,20 +822,23 @@ def _fallback_speakers(segments: list, num_speakers: int, has_profile: bool) -> 
 
 @app.route("/voice/register", methods=["POST"])
 def voice_register():
-    """Extract voice fingerprint from a recorded sample."""
     if "audio" not in request.files:
-        return jsonify({"error": "Niciun fisier audio"}), 400
+        return jsonify({"error": "Niciun fișier audio"}), 400
 
     audio_file = request.files["audio"]
-    with tempfile.NamedTemporaryFile(suffix=".webm", delete=False) as tmp:
+    original_name = audio_file.filename or "sample.webm"
+    suffix = "." + original_name.rsplit(".", 1)[-1].lower() if "." in original_name else ".webm"
+
+    with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as tmp:
         audio_file.save(tmp.name)
         tmp_path = tmp.name
 
+    log.info("Înregistrare profil vocal: %s", original_name)
     try:
         fingerprint = extract_voice_fingerprint(tmp_path)
         return jsonify({"fingerprint": fingerprint, "ok": True})
     except Exception as e:
-        traceback.print_exc()
+        log.error("Voice register eroare: %s\n%s", e, traceback.format_exc())
         return jsonify({"error": str(e)}), 500
     finally:
         try:
@@ -782,7 +865,7 @@ def postprocess():
     if not segments:
         return jsonify({"error": "Transcript gol"}), 400
     if not ANTHROPIC_API_KEY:
-        return jsonify({"error": "Adauga ANTHROPIC_API_KEY in .env pentru corectie AI"}), 400
+        return jsonify({"error": "Adaugă ANTHROPIC_API_KEY în .env pentru corecție AI"}), 400
     corrected = post_process_transcript(segments)
     return jsonify({"segments": corrected})
 
@@ -810,13 +893,17 @@ def export_pdf():
     summary_data = data.get("summary", {}) or {}
     timestamp = data.get("timestamp", datetime.now().strftime("%Y-%m-%d %H:%M"))
     duration = data.get("duration", 0)
-    buf = build_pdf(segments, summary_data, timestamp, duration)
-    return send_file(
-        buf,
-        as_attachment=True,
-        download_name=f"transcript_{timestamp.replace(':', '-')}.pdf",
-        mimetype="application/pdf",
-    )
+    try:
+        buf = build_pdf(segments, summary_data, timestamp, duration)
+        return send_file(
+            buf,
+            as_attachment=True,
+            download_name=f"transcript_{timestamp.replace(':', '-')}.pdf",
+            mimetype="application/pdf",
+        )
+    except Exception as e:
+        log.error("Export PDF eroare: %s\n%s", e, traceback.format_exc())
+        return jsonify({"error": f"Export PDF eșuat: {str(e)}"}), 500
 
 
 @app.route("/check-api", methods=["GET"])
@@ -829,15 +916,46 @@ def check_api():
     })
 
 
+# ===== LOGS ENDPOINT =====
+
+@app.route("/logs")
+def view_logs():
+    """Returnează ultimele N linii din log. Accesibil doar din rețeaua internă sau cu cheie."""
+    log_key = os.getenv("LOG_ACCESS_KEY", "")
+    if log_key and request.args.get("key") != log_key:
+        return jsonify({"error": "Acces interzis. Adaugă ?key=<LOG_ACCESS_KEY>"}), 403
+
+    n = min(int(request.args.get("n", 200)), 1000)
+    log_file = LOGS_DIR / "app.log" if LOGS_DIR else None
+
+    if not log_file or not log_file.exists():
+        return jsonify({"error": "Fișierul de log nu există (posibil pe sistem fără acces la disc)", "lines": []})
+
+    try:
+        with open(log_file, "r", encoding="utf-8") as f:
+            lines = f.readlines()
+        recent = [l.rstrip() for l in lines[-n:]]
+        errors = [l for l in recent if "[ERROR]" in l or "[WARNING]" in l]
+        return jsonify({
+            "total_lines": len(lines),
+            "returned": len(recent),
+            "errors_warnings": len(errors),
+            "lines": recent,
+            "errors_only": errors[-50:],
+        })
+    except Exception as e:
+        return jsonify({"error": str(e), "lines": []}), 500
+
+
 if __name__ == "__main__":
     PORT = int(os.getenv("PORT", 8080))
-    print("\n" + "=" * 50)
-    print("  Transcriptor AI - BlockchainAttorney")
-    print("=" * 50)
-    print(f"  Transcriere (Groq): {'DA' if GROQ_API_KEY else 'NU'}")
-    print(f"  Rezumat AI (Claude): {'DA' if ANTHROPIC_API_KEY else 'NU'}")
-    print(f"  Google Drive: {'DA' if (GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET) else 'NU'}")
-    print(f"  Limba: {LANGUAGE}")
-    print(f"\n  Deschide: http://localhost:{PORT}")
-    print("=" * 50 + "\n")
+    log.info("=" * 50)
+    log.info("  Transcriptor AI - BlockchainAttorney")
+    log.info("=" * 50)
+    log.info("  Transcriere (Groq): %s", "DA" if GROQ_API_KEY else "NU")
+    log.info("  Rezumat AI (Claude): %s", "DA" if ANTHROPIC_API_KEY else "NU")
+    log.info("  Google Drive: %s", "DA" if (GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET) else "NU")
+    log.info("  Limba: %s", LANGUAGE)
+    log.info("  Deschide: http://localhost:%d", PORT)
+    log.info("=" * 50)
     app.run(debug=False, host="0.0.0.0", port=PORT)

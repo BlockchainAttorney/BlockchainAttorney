@@ -8,6 +8,9 @@ __pycache__/
 # Transcrieri (date private ale clientilor)
 transcripts/
 
+# Loguri aplicatie
+logs/
+
 # Modele Whisper descarcate local
 ~/.cache/huggingface/
 models/
